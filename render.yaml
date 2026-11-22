@@ -1,0 +1,10 @@
+# Render 的一键部署配置（免费档）。
+# 用法：把这个仓库推到 GitHub，在 render.com 里选 New -> Blueprint，选中仓库即可。
+services:
+  - type: web
+    name: langrensha
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 server.py
+    healthCheckPath: /healthz
