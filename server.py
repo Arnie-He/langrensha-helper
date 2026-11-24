@@ -163,7 +163,10 @@ class Handler(BaseHTTPRequestHandler):
         cache = ('no-cache' if DEV else
                  'public, max-age=86400' if ext in ('.m4a', '.mp3', '.wav', '.woff2') else
                  'public, max-age=600' if ext in ('.svg', '.jpg', '.png', '.webp') else 'no-cache')
-        if self.headers.get('If-None-Match') == etag:
+        # 前面的代理压缩内容时会把 ETag 改成弱校验（W/"..."），比较时要把这个前缀去掉
+        seen = [t.strip()[2:] if t.strip().startswith('W/') else t.strip()
+                for t in (self.headers.get('If-None-Match') or '').split(',')]
+        if etag in seen:
             self.send_response(304)
             self.send_header('ETag', etag)
             self.send_header('Cache-Control', cache)
