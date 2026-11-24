@@ -181,7 +181,8 @@ DEFAULT_PRESET = 'p12a'          # 新建房间时默认的板子：12 人预女
 
 def default_config():
     roles = next(p['roles'] for p in PRESETS if p['id'] == DEFAULT_PRESET)
-    return {'roles': full_roles(roles), 'witch_self_save': 'first',
+    # 女巫自救默认「不可以」（第一晚也不能）；房主可以在改板子里换成「仅首夜」或「可以」
+    return {'roles': full_roles(roles), 'witch_self_save': 'never',
             'win': 'side', 'sheriff': True}
 
 
