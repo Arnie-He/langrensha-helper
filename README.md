@@ -136,9 +136,11 @@ game.py            游戏引擎：夜晚流程、结算、警长竞选
 roles.py           角色表、常规板子、夜晚顺序
 clips.py           语音台词
 qr.py              二维码生成
-public/            手机端页面（index.html / app.js / style.css）
+public/            手机端页面（index.html / app.js / fx.js / style.css）
 public/audio/      语音文件
+public/avatars/    角色 Q 版头像（JPEG）
 tools/gen_audio.py 重新生成语音（只能在 Mac 上运行）
+tools/avatar_gen/  用 Codex 重新生成角色头像
 tools/bots.py      模拟玩家，一个人也能把流程走一遍
 tests/             引擎测试
 render.yaml        Render 的部署配置
@@ -172,6 +174,22 @@ python3 tools/gen_audio.py
 ```
 
 默认用系统自带的「婷婷」。也可以自己录音，用同名 `.m4a` 文件替换 `public/audio/` 里的文件。
+
+## 角色头像
+
+`public/avatars/` 里每个角色一张 Q 版头像（320px JPEG），由 Codex 的图像生成画出来，
+画风描述和每个角色的外形写在 `tools/avatar_gen/`，重画方法见那里的 README。
+
+头像出现在：首页、大厅的板子卡片、改板子列表、技能说明、按住看身份、亮牌后的座位。
+
+## 开场动画和背景音乐
+
+第一次打开首页会播一段开场（「天黑请闭眼」大字划过、眨眼、角色卡闪过，背景飘狼人杀梗弹幕），
+点任意位置跳过，点首页的「狼人杀」标题可以重播。代码在 `public/fx.js`。
+
+背景音乐只在首页、大厅和结束页播放，开局后自动停，不会和房主手机的语音播报打架；
+首页右上角和菜单里可以关掉。默认是浏览器现场合成的一段夜晚小调；
+想换成自己的曲子，把文件放到 `public/audio/bgm.m4a`，会自动优先播放它。
 
 ## 部署到公网
 

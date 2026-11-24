@@ -4,20 +4,24 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="format-detection" content="telephone=no">
-<meta name="theme-color" content="#0c0e14">
-<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#211d4a">
+<meta name="color-scheme" content="dark light">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>狼人杀面杀助手</title>
 <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body data-sky="dusk">
+<div id="sky" aria-hidden="true"><i class="s-dusk"></i><i class="s-night"></i><i class="s-day"></i><i class="s-blood"></i><i class="s-dawn"></i><b class="stars"></b><b class="orb"></b></div>
+<div id="dm" aria-hidden="true"></div>
 <div id="app"></div>
 <div id="sheet" hidden></div>
 <div id="peek" hidden></div>
+<div id="intro" hidden></div>
 <div id="toast" hidden></div>
 <noscript><p style="padding:24px;color:#fff">需要开启 JavaScript 才能使用。</p></noscript>
+<script src="fx.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
