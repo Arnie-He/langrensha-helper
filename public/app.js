@@ -571,15 +571,16 @@
   function homeScreen() {
     var hero = '<div class="hero">' +
       '<button class="snd' + (FX.bgm.muted ? ' off' : '') + '" data-act="snd" aria-label="背景音乐">' + SND + '</button>' +
-      '<h1 class="title">狼人杀</h1><p class="sub">面杀助手</p></div>';
-    if (cred) return '<div class="screen home"><main class="main" data-k="home">' + hero + '<p class="hint center">正在进入房间…</p></main></div>';
+      '<div class="moon"></div><h1 class="title">狼人杀</h1><p class="sub">面杀助手</p></div>';
+    var ground = '<div class="ground"></div>';
+    if (cred) return '<div class="screen home"><main class="main" data-k="home">' + hero + '<p class="hint center">正在进入房间…</p></main>' + ground + '</div>';
     var name = '<label class="field"><input id="in-name" maxlength="8" placeholder="你的昵称" aria-label="你的昵称" autocomplete="off" enterkeyhint="done"></label>';
     var code = '<label class="field"><input id="in-code" class="codein" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="房间号" aria-label="房间号" autocomplete="off" enterkeyhint="done"></label>';
     var body = fromLink
       ? name + code + btn('加入房间', 'join', 'pri') + '<div class="or"></div>' + btn('创建新房间', 'create')
       : name + btn('创建房间', 'create', 'pri') + '<div class="or"></div>' + code + btn('加入房间', 'join');
     return '<div class="screen home"><main class="main" data-k="home">' + hero +
-      '<div class="panel stack">' + body + '</div></main></div>';
+      '<div class="panel stack">' + body + '</div></main>' + ground + '</div>';
   }
 
   function claimScreen() {
@@ -592,7 +593,7 @@
       : '<p class="hint center">这一局已经开始，等结束再进来。</p>';
     return '<div class="screen home"><main class="main" data-k="claim">' +
       '<div class="logo"><h1>房间 ' + esc(c.code) + '</h1><p>游戏已经开始了</p></div>' + body +
-      '<div class="stack" style="margin-top:20px">' + btn('返回', 'claim-back') + '</div></main></div>';
+      '<div class="stack" style="margin-top:20px">' + btn('返回', 'claim-back') + '</div></main><div class="ground"></div></div>';
   }
 
   // ---------- 大厅：入座
@@ -663,7 +664,7 @@
       main = '<div class="sleep"><div class="moon"></div><h1>天黑请闭眼</h1>' +
         (V.me && !V.me.alive ? '<p>你已出局</p>' : '') +
         (V.you.host ? '<div class="hostnote">本机负责播报，请保持亮屏</div>' : '') + '</div>';
-      return frame({ title: title, main: main, cls: 'night', peek: true, key: 'sleep' });
+      return frame({ title: title, main: main, cls: 'night sleeping', peek: true, key: 'sleep' });
     }
     var red = p.tone === 'red';
 
@@ -675,7 +676,7 @@
 
     if (p.ui === 'result') {
       var rid = roleIdByName(p.big);
-      var pic = rid ? medal(rid) : '';
+      var pic = rid ? medal(rid) : p.tone === 'bad' ? art('emblem_wolf', 'emblem') : p.tone === 'good' ? art('emblem_good', 'emblem') : '';
       main = '<div class="result ' + (p.tone || 'plain') + '"><div class="lbl">' + esc(p.title) + '</div>' + pic + '<div class="big">' + esc(p.big) + '</div>' +
         (p.lines || []).map(function (l) { return '<p>' + esc(l) + '</p>'; }).join('') + '</div>';
       bar = btn(esc(p.ok), 'night-ok', 'pri');
@@ -908,7 +909,8 @@
     var o = V.over, w = o.winner;
     var ttl = { good: '好人获胜', wolf: '狼人获胜', third: '情侣获胜' }[w];
     var mine = V.me ? o.camps[V.you.seat] : null;
-    var main = '<div class="verdict ' + w + '"><h1>' + ttl + '</h1>' +
+    var emb = w === 'wolf' ? art('emblem_wolf', 'emblem') : w === 'good' ? art('emblem_good', 'emblem') : '';
+    var main = '<div class="verdict ' + w + '"><h1>' + emb + ttl + '</h1>' +
       '<p>' + (V.me ? '你是' + role(V.me.role).name + '，' + (mine === w ? '赢了' : '输了') : '') + '</p></div>' +
       grid(function (s) {
         var c = o.causes[s.seat], love = has(o.lovers, s.seat);
@@ -1250,7 +1252,8 @@
     info = j;
     j.roles.forEach(function (r) { ROLE[r.id] = r; new Image().src = avSrc(r.id); });
     ['cardback', 'frame_dark', 'frame_bone', 'frame_red', 'frame_gold', 'frame_line_ink', 'frame_dash', 'token_dim', 'token_red',
-      'ring_red', 'ring_gold', 'cross', 'moon', 'potion_save', 'potion_poison', 'badge_sheriff', 'mark_done', 'mark_wait']
+      'token_dead', 'ring_red', 'ring_gold', 'cross', 'moon', 'potion_save', 'potion_poison', 'badge_sheriff', 'mark_done', 'mark_wait',
+      'emblem_good', 'emblem_wolf']
       .forEach(function (f) { new Image().src = 'art/' + f + '.svg'; });
     lastHtml = ''; lastSheet = '';
     paint();

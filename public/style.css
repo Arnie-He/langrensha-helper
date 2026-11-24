@@ -1,7 +1,9 @@
 /* 狼人杀面杀助手 —— 手机竖屏
  *
- * 手绘风，但尽量简单：平涂的底色、手写体的字、手画的一圈线，没有别的装饰。
- *   - 线条和圆牌是 public/art/*.svg（由 tools/sketch 画出来）
+ * 手绘风，装饰点到为止：平涂的底色、手写体的字、来回描两遍的线，
+ * 加上少量不占地方的点缀（深色天空上的几颗星、按钮栏上沿的一排远景剪影、圆桌中间的一圈刻度）。
+ * 不用纸纹、阴影、倾斜和动画。
+ *   - 线条、圆牌和点缀都是 public/art/*.svg（由 tools/sketch 画出来）
  *   - 颜色只有旧纸、墨、骨白，加上少量芥末黄（主要按钮）、血红（危险 / 狼人）、苔绿（做完了）
  *   - body[data-sky] 跟着游戏阶段换底色：
  *       dusk 首页、大厅、发牌    night 夜晚（最暗，防止亮屏暴露）
@@ -25,6 +27,8 @@
 
   /* 直接写在底色上的字和线 */
   --bg: #221b15;
+  --ground: #17120e;          /* 按钮栏（地面）和远景剪影的颜色 */
+  --stars: .55;
   --tx: #ece2c6;
   --dim: rgba(236, 226, 198, .64);
   --faint: rgba(236, 226, 198, .34);
@@ -47,6 +51,8 @@
 }
 body[data-sky="night"] {
   --bg: #0e0c0a;
+  --ground: #060504;
+  --stars: .4;
   --tx: #cfc4a6;
   --dim: rgba(207, 196, 166, .58);
   --faint: rgba(207, 196, 166, .3);
@@ -63,6 +69,8 @@ body[data-sky="night"] {
 }
 body[data-sky="day"], body[data-sky="dawn"] {
   --bg: #d6c7a1;
+  --ground: #c5b58b;
+  --stars: 0;
   --tx: #1c1712;
   --dim: rgba(28, 23, 18, .68);
   --faint: rgba(28, 23, 18, .4);
@@ -74,7 +82,7 @@ body[data-sky="day"], body[data-sky="dawn"] {
   --frame: url(art/frame_bone.svg);
   --pbg: #ece2c6;
 }
-body[data-sky="blood"] { --bg: #2b100c; }
+body[data-sky="blood"] { --bg: #2b100c; --ground: #1a0907; }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
@@ -113,6 +121,12 @@ img { -webkit-user-drag: none; }
 /* ---------- 骨架 ---------- */
 
 #app { position: fixed; top: 0; right: 0; bottom: 0; left: 0; display: flex; justify-content: center; }
+/* 首页和「天黑请闭眼」的天空上有几颗星 */
+.home::before, .sleeping::before {
+  content: ""; position: absolute; top: var(--st); right: 0; left: 0; z-index: -1; height: 240px; pointer-events: none;
+  background: url(art/stars.svg) center top / 400px auto repeat-x; opacity: var(--stars);
+}
+.sleeping::before { top: calc(var(--st) + 54px); }
 
 .screen {
   width: 100%;
@@ -147,6 +161,8 @@ img { -webkit-user-drag: none; }
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   padding: 2px 16px 20px;
+  position: relative;       /* 内容盖在远景剪影上面 */
+  z-index: 1;
 }
 
 /* 纸片：里面的字和线换成纸片上的颜色 */
@@ -186,7 +202,17 @@ img { -webkit-user-drag: none; }
 .btn.sm { flex: none; width: auto; min-height: 38px; padding: 0 5px; border-width: 9px; border-image-width: 9px; font-size: 15px; letter-spacing: 1px; }
 .link { display: block; width: 100%; min-height: 40px; text-align: center; font: 15px var(--hand); color: var(--dim); text-decoration: underline; text-underline-offset: 4px; }
 
-.bar { flex: none; padding: 6px 14px calc(10px + var(--sb)); }
+/* 按钮栏是「地面」：比天空深一点，上沿是一排远景剪影（蒙版，颜色跟着 --ground） */
+.screen > .bar, .ground { position: relative; flex: none; background: var(--ground); transition: background-color .8s ease; }
+.screen > .bar::before, .ground::before {
+  content: ""; position: absolute; right: 0; bottom: calc(100% - 1px); left: 0; height: 46px; pointer-events: none;
+  background: var(--ground); transition: background-color .8s ease;
+  -webkit-mask: url(art/skyline.svg) center bottom / auto 100% repeat-x; mask: url(art/skyline.svg) center bottom / auto 100% repeat-x;
+}
+.bar { flex: none; padding: 8px 14px calc(10px + var(--sb)); }
+.ground { height: calc(16px + var(--sb)); }
+.home .ground { height: calc(22px + var(--sb)); }
+.home .ground::before { height: 62px; }
 .bar .row { display: flex; gap: 8px; }
 .bar .row .btn { flex: 1; min-width: 0; }
 .bar .row .btn.pri, .bar .row .btn.red { flex: 2; }
@@ -201,12 +227,17 @@ img { -webkit-user-drag: none; }
 /* ---------- 首页 ---------- */
 
 .home .main { padding: 0 26px 24px; }
-.hero { position: relative; padding: 16vh 0 28px; text-align: center; }
+.hero { position: relative; padding: 8vh 0 26px; text-align: center; }
+.hero .moon { width: 80px; height: 80px; margin: 0 auto 8px; transform: rotate(12deg); }
 .snd { position: absolute; top: 6px; right: -14px; width: 44px; height: 44px; display: grid; place-items: center; color: var(--dim); }
 .snd svg { width: 18px; height: 18px; }
 .snd.off svg .wave { display: none; }
 .snd:not(.off) svg .x { display: none; }
-.title { font: 400 64px/1.1 var(--hand); letter-spacing: 8px; text-indent: 8px; }
+.title { position: relative; display: inline-block; font: 400 64px/1.1 var(--hand); letter-spacing: 8px; text-indent: 8px; }
+.title::after {      /* 标题旁边的三道爪痕 */
+  content: ""; position: absolute; top: -8px; right: -44px; width: 68px; height: 68px; transform: rotate(8deg); pointer-events: none;
+  background: url(art/claw.svg) center / contain no-repeat;
+}
 .sub { margin-top: 6px; font: 15px var(--hand); letter-spacing: 6px; text-indent: 6px; color: var(--dim); }
 .home .logo { margin: 16vh 0 22px; text-align: center; }
 .home .logo h1 { font-size: 36px; letter-spacing: 4px; }
@@ -221,7 +252,10 @@ img { -webkit-user-drag: none; }
 .field input::placeholder { color: rgba(28, 23, 18, .4); letter-spacing: 2px; }
 .field input.codein { font-size: 24px; letter-spacing: 10px; text-indent: 10px; font-variant-numeric: tabular-nums; }
 .field input.codein::placeholder { font-size: 19px; text-indent: 0; }
-.panel .or { margin: 18px 30px; }
+.panel .or {
+  height: 12px; margin: 16px 20px; opacity: .6;
+  -webkit-mask: url(art/orn.svg) center / 100% 100% no-repeat; mask: url(art/orn.svg) center / 100% 100% no-repeat;
+}
 
 .moon { width: 96px; height: 96px; background: url(art/moon.svg) center / contain no-repeat; }
 
@@ -251,6 +285,12 @@ img { -webkit-user-drag: none; }
 .main[data-k^="day"] .ring { --chrome: 270px; }
 .main[data-k="over"] .ring { --chrome: 230px; }
 
+/* 圆桌中间的一圈刻度 */
+.ring::before {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 42%; aspect-ratio: 1; transform: translate(-50%, -50%);
+  pointer-events: none; background: var(--tx); opacity: .3;
+  -webkit-mask: url(art/dial.svg) center / contain no-repeat; mask: url(art/dial.svg) center / contain no-repeat;
+}
 .ring .table { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); text-align: center; }
 .table .big { font: 400 34px/1.05 var(--hand); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .table .big small { font-size: 18px; color: var(--dim); }
@@ -276,7 +316,9 @@ button.seat:active .tk { opacity: .7; }
 .seat .tk::after, .seat .tk::before { content: none; position: absolute; pointer-events: none; background: center / 100% 100% no-repeat; }
 .seat.sel .tk::after { content: ""; top: -14%; right: -14%; bottom: -14%; left: -14%; background-image: url(art/ring_gold.svg); }
 .seat.sel.kill .tk::after { background-image: url(art/ring_red.svg); }
-.seat.dead .tk { filter: grayscale(1) brightness(.75); }
+/* 出局：圆牌换成灰的，头像去色，上面的叉保持红色 */
+.seat.dead .tk { background-image: url(art/token_dead.svg); }
+.seat.dead .tk .av { filter: grayscale(1) brightness(.8); }
 .seat.dead .tk::before { content: ""; z-index: 2; top: 8%; right: 8%; bottom: 8%; left: 8%; background-image: url(art/cross.svg); }
 .seat.dead .nm { color: var(--faint); text-decoration: line-through; }
 /* 不可选的座位只把圆牌和名字压淡，「做完了 / 还没做」的记号保持清楚 */
@@ -361,6 +403,7 @@ button.seat:active .tk { opacity: .7; }
 .result { margin-top: 8vh; text-align: center; }
 .result .lbl { font-size: 17px; }
 .result .medal { width: 150px; height: 150px; margin-top: 16px; }
+.result .art-emblem { display: block; width: 124px; height: 124px; margin: 16px auto 0; }
 .result .big { margin-top: 12px; font: 400 60px/1.2 var(--hand); letter-spacing: 8px; text-indent: 8px; }
 .result.bad .big { color: var(--red2); }
 .result.good .big { color: var(--ok); }
@@ -384,6 +427,7 @@ button.seat:active .tk { opacity: .7; }
 
 .verdict { padding: 8px 0 2px; text-align: center; }
 .verdict h1 { font-size: 34px; line-height: 1.2; letter-spacing: 6px; text-indent: 6px; }
+.verdict .art-emblem { width: 40px; height: 40px; margin: -8px 8px 0 -6px; vertical-align: middle; }
 .verdict p { margin-top: 4px; font: 16px var(--hand); letter-spacing: 1px; color: var(--dim); }
 .log p { position: relative; padding: 7px 0 10px; font-size: 14px; line-height: 1.6; }
 .log p::after { position: absolute; left: 0; right: 0; bottom: 0; }
@@ -444,15 +488,20 @@ button.seat:active .tk { opacity: .7; }
   .title { font-size: 54px; }
 }
 @media (max-height: 740px) {
-  .hero { padding: 9vh 0 20px; }
+  .hero { padding: 7vh 0 18px; }
+  .hero .moon { width: 68px; height: 68px; margin-bottom: 4px; }
   .idcard .art { width: 52%; }
   .lobbyhd .qr { width: 50px; height: 50px; }
   .lobbyhd .digits { font-size: 30px; }
 }
 @media (max-height: 600px) {
-  .hero { padding: 4vh 0 14px; }
+  .hero { padding: 3vh 0 12px; }
+  .hero .moon { width: 58px; height: 58px; }
   .title { font-size: 52px; }
   .idcard .art { width: 44%; }
+}
+@media (max-height: 530px) {      /* 键盘弹出来或屏幕很矮时，把点缀让出来 */
+  .hero .moon, .ground { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: .01ms !important; }
