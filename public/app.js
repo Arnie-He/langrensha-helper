@@ -515,7 +515,7 @@
     }).join('') + '</div>';
     var hero = '<div class="hero">' +
       '<button class="snd' + (FX.bgm.muted ? ' off' : '') + '" data-act="snd" aria-label="背景音乐">' + SND + '</button>' +
-      fan + '<h1 class="title" data-act="replay">狼人杀</h1></div>';
+      fan + '<h1 class="title" data-act="replay"><img src="art/logo.webp" alt="狼人杀"></h1></div>';
     if (cred) return '<div class="screen home"><main class="main" data-k="home">' + hero + '<p class="hint center" style="margin-top:24px">正在进入房间…</p></main></div>';
     var name = '<label class="field"><span>你的昵称</span><input id="in-name" maxlength="8" placeholder="最多 8 个字" autocomplete="off" enterkeyhint="done"></label>';
     var code = '<label class="field"><span>房间号</span><input id="in-code" class="codein" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="····" autocomplete="off" enterkeyhint="done"></label>';
@@ -587,7 +587,7 @@
       main = '<div class="sleep"><h1>本局旁观</h1><p>你没有入座，这一局只能看</p></div>';
       bar = '';
     } else {
-      main = '<button class="idcard" data-hold="1"><div class="moon"></div><div class="lbl">你是 ' + V.you.seat + ' 号</div>' +
+      main = '<button class="idcard" data-hold="1"><span class="art"></span><div class="lbl">你是 ' + V.you.seat + ' 号</div>' +
         '<div class="big">按住这里看身份</div><div class="hint">用手挡一下屏幕，松手就会藏起来</div></button>' +
         '<div class="progress">已看完身份 ' + d.count + ' / ' + n + '</div>';
       if (!d.seen) {
@@ -1203,6 +1203,7 @@
   fetch('/api/info').then(function (r) { return r.json(); }).then(function (j) {
     info = j;
     j.roles.forEach(function (r) { ROLE[r.id] = r; new Image().src = avSrc(r.id); });
+    ['cardback.jpg', 'bg_night.jpg', 'bg_day.jpg', 'moon.webp', 'sun.webp'].forEach(function (f) { new Image().src = 'art/' + f; });
     lastHtml = ''; lastSheet = '';
     paint();
   }).catch(function () { /* 稍后刷新页面即可 */ });

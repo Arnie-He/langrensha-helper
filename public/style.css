@@ -27,8 +27,8 @@
   --tx: #fbf6ff;
   --dim: rgba(240, 230, 255, .68);
   --faint: rgba(240, 230, 255, .38);
-  --glass: rgba(255, 255, 255, .09);
-  --glass2: rgba(255, 255, 255, .15);
+  --glass: rgba(34, 24, 84, .46);
+  --glass2: rgba(70, 52, 140, .45);
   --line: rgba(255, 255, 255, .16);
   --line2: rgba(255, 255, 255, .28);
   --soft: 0 10px 30px rgba(12, 6, 40, .32);
@@ -87,11 +87,12 @@ h1, h2, p { margin: 0; }
 
 #sky { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 0; overflow: hidden; }
 #sky i { position: absolute; top: 0; right: 0; bottom: 0; left: 0; opacity: 0; transition: opacity 1.6s ease; }
-#sky .s-dusk { background: radial-gradient(120% 60% at 50% 100%, #b06aa8 0%, rgba(176, 106, 168, 0) 60%), linear-gradient(180deg, #1e1748 0%, #35286e 50%, #5a3c8c 100%); }
-#sky .s-night { background: radial-gradient(100% 50% at 50% 100%, #2c2160 0%, rgba(44, 33, 96, 0) 70%), linear-gradient(180deg, #0c0a20 0%, #151236 100%); }
-#sky .s-day { background: radial-gradient(90% 50% at 85% 0%, #fff6d8 0%, rgba(255, 246, 216, 0) 60%), linear-gradient(180deg, #bfe2ff 0%, #e4efff 45%, #ffe6f0 100%); }
-#sky .s-blood { background: radial-gradient(110% 60% at 50% 100%, #c0405e 0%, rgba(192, 64, 94, 0) 65%), linear-gradient(180deg, #2a0c26 0%, #5c1a40 100%); }
-#sky .s-dawn { background: radial-gradient(110% 60% at 50% 100%, #fff0c8 0%, rgba(255, 240, 200, 0) 65%), linear-gradient(180deg, #ffc6d8 0%, #ffe0d0 55%, #fff3dc 100%); }
+/* 背景是 Codex 画的村庄夜景 / 白天（public/art），渐变只在图片没加载出来时垫底 */
+#sky .s-dusk { background: url(art/bg_dusk.jpg) center bottom / cover no-repeat, linear-gradient(180deg, #1e1748 0%, #35286e 50%, #5a3c8c 100%); }
+#sky .s-night { background: url(art/bg_night.jpg) center bottom / cover no-repeat, linear-gradient(180deg, #0c0a20 0%, #151236 100%); }
+#sky .s-day { background: url(art/bg_day.jpg) center bottom / cover no-repeat, linear-gradient(180deg, #bfe2ff 0%, #e4efff 45%, #ffe6f0 100%); }
+#sky .s-blood { background: linear-gradient(180deg, rgba(90, 10, 40, .55), rgba(170, 30, 70, .5)), url(art/bg_dusk.jpg) center bottom / cover no-repeat, #3a0c2a; }
+#sky .s-dawn { background: linear-gradient(180deg, rgba(255, 190, 200, .35), rgba(255, 225, 190, .25)), url(art/bg_day.jpg) center bottom / cover no-repeat, #ffd8d8; }
 body[data-sky="dusk"] #sky .s-dusk, body[data-sky="night"] #sky .s-night, body[data-sky="day"] #sky .s-day,
 body[data-sky="blood"] #sky .s-blood, body[data-sky="dawn"] #sky .s-dawn { opacity: 1; }
 
@@ -116,6 +117,7 @@ body[data-sky="blood"] #sky .s-blood, body[data-sky="dawn"] #sky .s-dawn { opaci
   animation: twinkle 4.5s ease-in-out infinite alternate;
 }
 @keyframes twinkle { from { opacity: .15; } to { opacity: .8; } }
+#sky .stars, #sky .orb { display: none; }   /* 背景图里已经有星星和月亮 / 太阳 */
 body[data-sky="day"] #sky .stars, body[data-sky="dawn"] #sky .stars { opacity: 0; }
 body[data-sky="night"] #sky .stars { opacity: .4; }
 
@@ -235,7 +237,7 @@ body[data-sky="day"] .warn-t { color: #d2456a; }
 .btn.pri { background: var(--pri); border-color: rgba(255, 255, 255, .5); color: var(--plum); box-shadow: var(--pri-glow), inset 0 1px 0 rgba(255, 255, 255, .7); }
 .btn.red { background: var(--danger); border-color: rgba(255, 255, 255, .35); color: #fff; box-shadow: 0 8px 22px rgba(255, 90, 130, .35), inset 0 1px 0 rgba(255, 255, 255, .45); }
 .btn.sm { flex: none; width: auto; min-height: 38px; padding: 0 15px; font-size: 14px; }
-.btn[disabled] { background: transparent; border: 1px dashed var(--line2); color: var(--faint); box-shadow: none; pointer-events: none; }
+.btn[disabled] { background: var(--glass); border: 1px dashed var(--line2); color: var(--dim); box-shadow: none; pointer-events: none; }
 .link { display: block; width: 100%; min-height: 44px; text-align: center; font-size: 14px; color: var(--dim); text-decoration: underline; text-underline-offset: 3px; }
 
 .bar { flex: none; padding: 10px 16px calc(14px + var(--sb)); }
@@ -274,12 +276,8 @@ body[data-sky="day"] .warn-t { color: #d2456a; }
 .fan .fc img { width: 100%; height: 100%; border-radius: 12px; object-fit: cover; background: none; }
 .fan .fc.wolf { z-index: 1; }
 
-.title {
-  position: relative; margin-top: 22px; font: 800 60px/1.05 var(--round); letter-spacing: 8px;
-  background: linear-gradient(180deg, #fff6dc 10%, #ffd98a 55%, #ffa8c2 100%);
-  -webkit-background-clip: text; background-clip: text; color: transparent;
-  filter: drop-shadow(0 4px 14px rgba(255, 170, 190, .45));
-}
+.title { position: relative; width: 74%; max-width: 300px; margin-top: 6px; }
+.title img { display: block; width: 100%; height: auto; pointer-events: none; }
 .title em {
   position: absolute; right: -40px; top: -10px; padding: 3px 10px; border-radius: 999px;
   background: rgba(255, 255, 255, .14); border: 1px solid rgba(255, 255, 255, .35); color: #fff;
@@ -293,7 +291,7 @@ body[data-sky="day"] .warn-t { color: #d2456a; }
 .field span { display: block; margin: 0 6px 6px; font-size: 13px; color: var(--dim); }
 .field input {
   width: 100%; height: 52px; padding: 0 18px; border-radius: 999px;
-  background: rgba(255, 255, 255, .07); border: 1px solid var(--line); outline: none; font-size: 17px;
+  background: rgba(20, 14, 52, .4); border: 1px solid var(--line); outline: none; font-size: 17px;
   transition: border-color .2s ease, box-shadow .2s ease;
 }
 .field input::placeholder { color: var(--faint); }
@@ -303,7 +301,7 @@ body[data-sky="day"] .warn-t { color: #d2456a; }
 .or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .stack > * + * { margin-top: 12px; }
 
-.moon { width: 92px; height: 92px; border-radius: 50%; box-shadow: inset -20px -8px 0 0 #fff1c4, 0 0 40px rgba(255, 241, 196, .12); transform: rotate(-24deg); }
+.moon { width: 120px; height: 120px; background: url(art/moon.webp) center / contain no-repeat; }
 
 /* ---------- 大厅 ---------- */
 
@@ -340,8 +338,8 @@ body[data-sky="day"] .ring .table, body[data-sky="dawn"] .ring .table { backgrou
 .table .big { font: 700 30px/1.1 var(--round); font-variant-numeric: tabular-nums; }
 .table .big small { font-size: 17px; color: var(--dim); }
 .table .sm { margin-top: 4px; font-size: 12px; line-height: 1.35; color: var(--dim); }
-.table .moon { width: 44px; height: 44px; box-shadow: inset -10px -4px 0 0 #fff1c4; margin-bottom: 4px; }
-.table .sun { width: 34px; height: 34px; margin-bottom: 6px; border-radius: 50%; background: radial-gradient(circle at 40% 40%, #fffbe8, #ffd98a); box-shadow: 0 0 0 6px rgba(255, 217, 138, .25), 0 0 24px rgba(255, 200, 120, .5); }
+.table .moon { width: 52px; height: 52px; margin-bottom: 2px; }
+.table .sun { width: 50px; height: 50px; margin-bottom: 2px; background: url(art/sun.webp) center / contain no-repeat; }
 
 .slot { position: absolute; transform: translate(-50%, -50%); width: calc(var(--sz) + 22px); }
 .seat {
@@ -402,22 +400,19 @@ button.seat:active .tk { transform: scale(.92); }
 /* ---------- 发牌：按住看身份 ---------- */
 
 .idcard {
-  position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  width: 76%; max-width: 290px; aspect-ratio: 5 / 7; margin: 4vh auto 0; padding: 22px;
-  border-radius: 28px; border: 1px solid rgba(255, 255, 255, .35); text-align: center; touch-action: none; color: #fff;
-  background:
-    radial-gradient(circle at 50% 46%, transparent 0 33%, rgba(255, 217, 138, .25) 33.4% 33.9%, transparent 34.3%),
-    radial-gradient(circle at 50% 46%, transparent 0 38%, rgba(255, 255, 255, .12) 38.3% 38.6%, transparent 39%),
-    radial-gradient(circle, rgba(255, 255, 255, .16) .9px, transparent 1.1px) 0 0 / 16px 16px,
-    linear-gradient(160deg, #7a5ad6 0%, #4a3596 60%, #3a2a7a 100%);
-  box-shadow: 0 20px 50px rgba(12, 6, 40, .5), inset 0 0 0 7px rgba(255, 255, 255, .06), inset 0 1px 0 rgba(255, 255, 255, .3);
+  display: flex; flex-direction: column; align-items: center; width: 100%; margin: 3vh auto 0;
+  text-align: center; touch-action: none;
+}
+.idcard .art {
+  display: block; width: 68%; max-width: 270px; aspect-ratio: 457 / 640; border-radius: 22px;
+  background: url(art/cardback.jpg) center / cover no-repeat, #3a2a7a;
+  box-shadow: 0 20px 50px rgba(12, 6, 40, .55), 0 0 40px rgba(255, 210, 150, .18);
   transition: transform .15s ease;
 }
-.idcard .moon { width: 62px; height: 62px; box-shadow: inset -14px -5px 0 0 #ffe3a0; margin-bottom: 16px; }
-.idcard:active { transform: scale(.97); }
-.idcard .lbl { color: rgba(255, 255, 255, .7); }
-.idcard .big { margin: 8px 0 6px; font-size: 23px; font-weight: 700; letter-spacing: 1px; }
-.idcard .hint { color: rgba(255, 255, 255, .6); }
+.idcard:active .art { transform: scale(.97); }
+.idcard .lbl { margin-top: 18px; color: var(--dim); }
+.idcard .big { margin: 4px 0 4px; font-size: 21px; font-weight: 700; letter-spacing: 1px; }
+.idcard .hint { color: var(--dim); }
 .progress { margin-top: 22px; text-align: center; font: 600 15px var(--round); color: var(--dim); font-variant-numeric: tabular-nums; }
 
 #peek {
@@ -624,12 +619,10 @@ body[data-sky="night"] #sheet .box { background: linear-gradient(180deg, rgba(36
   100% { opacity: 1; transform: scale(1) rotate(var(--r)); filter: blur(0); }
 }
 .in-title {
-  position: absolute; left: 0; right: 0; top: calc(var(--st) + 13vh); z-index: 4; text-align: center;
-  font: 800 19vw/1.05 var(--round); letter-spacing: 3vw;
-  background: linear-gradient(180deg, #fff6dc 10%, #ffd98a 55%, #ffa8c2 100%); -webkit-background-clip: text; background-clip: text; color: transparent;
-  filter: drop-shadow(0 6px 22px rgba(255, 170, 190, .55));
+  position: absolute; left: 0; right: 0; top: calc(var(--st) + 9vh); z-index: 4; width: 78vw; max-width: 340px; margin: 0 auto;
   opacity: 0; animation: stamp .5s cubic-bezier(.3, 1.5, .5, 1) 4.75s both;
 }
+.in-title img { display: block; width: 100%; height: auto; }
 @keyframes stamp { 0% { opacity: 0; transform: scale(2.2); } 100% { opacity: 1; transform: scale(1); } }
 .in-skip {
   position: absolute; right: 18px; bottom: calc(22px + var(--sb)); z-index: 5; padding: 8px 18px; border-radius: 999px;

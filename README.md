@@ -139,6 +139,7 @@ qr.py              二维码生成
 public/            手机端页面（index.html / app.js / fx.js / style.css）
 public/audio/      语音文件
 public/avatars/    角色 Q 版头像（JPEG）
+public/art/        标题、卡背、月亮太阳、背景图
 tools/gen_audio.py 重新生成语音（只能在 Mac 上运行）
 tools/avatar_gen/  用 Codex 重新生成角色头像
 tools/bots.py      模拟玩家，一个人也能把流程走一遍
@@ -181,6 +182,7 @@ python3 tools/gen_audio.py
 画风描述和每个角色的外形写在 `tools/avatar_gen/`，重画方法见那里的 README。
 
 头像出现在：首页、大厅的板子卡片、改板子列表、技能说明、按住看身份、亮牌后的座位。
+标题、发牌卡背、月亮太阳和三张背景（黄昏、深夜、白天）在 `public/art/`，同样由 Codex 画出来。
 
 ## 开场动画和背景音乐
 

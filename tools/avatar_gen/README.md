@@ -8,6 +8,12 @@
 - `run_all.sh [roles.tsv]`：5 个并行画完列表里的所有角色
 - `process.sh`：把 `raw/*.png` 缩成 320px JPEG 放到 `public/avatars/`
 
+界面素材（标题、卡背、月亮、太阳、三张背景）也是这样画的：
+
+- `ui/<名字>.txt`：每个素材的完整描述
+- `gen_ui.sh <名字>`：画一个，存到 `raw/ui_<名字>.png`
+- `process_ui.py`：透明的存 WebP、不透明的存 JPEG，放到 `public/art/`
+
 重画某个角色：改 `roles.tsv` 里那一行，然后
 
 ```bash

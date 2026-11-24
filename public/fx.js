@@ -86,7 +86,7 @@
       '<div class="in-line l3">天黑请闭眼</div></div>' +
       '<div class="in-lid top"></div><div class="in-lid bot"></div>' +
       '<div class="in-cards">' + fan + '</div>' +
-      '<div class="in-title">狼人杀</div>' +
+      '<div class="in-title"><img src="art/logo.webp" alt="狼人杀"></div>' +
       '<button class="in-skip" type="button">跳过</button>';
     introEl.hidden = false;
     introEl.className = 'play';
