@@ -1,110 +1,14 @@
-/* 狼人杀面杀助手 —— 开场动画、弹幕、背景音乐
+/* 狼人杀面杀助手 —— 背景音乐
  *
  * 和游戏逻辑无关，app.js 通过 window.FX 调用：
- *   FX.intro(roles, done)   播放开场：「天黑请闭眼」大字划过 → 眨眼 → 角色卡闪过 → 收成一手牌
- *   FX.dm.start() / stop()  首页顶部的狼人杀梗弹幕
- *   FX.bgm.want(on)         需要 / 不需要背景音乐（受静音开关控制，第一次点屏幕后才能出声）
+ *   FX.bgm.want(on)    需要 / 不需要背景音乐（受静音开关控制，第一次点屏幕后才能出声）
+ *   FX.bgm.toggle()    开 / 关背景音乐
  */
 (function () {
   'use strict';
 
-  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
   function store(k, v) {
     try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; }
-  }
-
-  // ------------------------------------------------------------ 弹幕
-
-  var MEMES = [
-    '我是预言家，3 号查杀！', '女巫昨晚的药呢？', '这把我真是民', '警徽流 5、9', '悍跳狼别装了',
-    '我一张好人牌被你们投出去了', '平安夜？肯定有人自刀', '白痴翻牌！', '猎人别开枪，我是好人', '倒钩狼藏得好深',
-    '对跳预言家，站边谁？', '冲锋狼冲就完了', '金水在此', '我发誓我是好人', '今晚刀谁？',
-    '狼队友在干嘛', '银水也是水', '这个发言很狼', '先出 8 号', '我只是个村民啊',
-    '守卫守谁了？', '深水狼浮出水面', '求求了别投我', '首置位发言压力好大', '偷偷睁眼的出去',
-    '狼王开枪了！', '民都死光了还玩啥', '我闭眼了，真的', '这个金水不保真', '你们狼坑填满了吗',
-    '昨晚我听见有人在动', '我愿意给你发金水', '退水退水', '这轮必须出狼'
-  ];
-  var dmEl = document.getElementById('dm');
-  var dmTimer = null, dmLane = 0;
-
-  function spawn(top, bottom) {
-    if (!dm.on || dmEl.childElementCount > 16) return;
-    var s = document.createElement('span');
-    var t = MEMES[Math.floor(Math.random() * MEMES.length)];
-    var lanes = 6;
-    dmLane = (dmLane + 1 + Math.floor(Math.random() * 3)) % lanes;
-    var y = top + (bottom - top) * (dmLane + Math.random() * 0.4) / lanes;
-    var r = Math.random();
-    s.className = r < .16 ? 'hot' : r < .3 ? 'wolf' : r < .42 ? 'big' : '';
-    s.textContent = t;
-    s.style.top = y.toFixed(1) + '%';
-    s.style.animationDuration = (7 + Math.random() * 5).toFixed(2) + 's';
-    s.addEventListener('animationend', function () { s.remove(); });
-    dmEl.appendChild(s);
-  }
-
-  var dm = {
-    on: false, top: 2, bottom: 40,
-    start: function (top, bottom) {
-      if (reduce) return;
-      this.top = top == null ? 2 : top;
-      this.bottom = bottom == null ? 40 : bottom;
-      if (this.on) return;
-      this.on = true;
-      dmEl.classList.add('on');
-      for (var i = 0; i < 3; i++) setTimeout(function () { spawn(dm.top, dm.bottom); }, i * 300);
-      dmTimer = setInterval(function () { spawn(dm.top, dm.bottom); }, 900);
-    },
-    stop: function () {
-      if (!this.on) return;
-      this.on = false;
-      clearInterval(dmTimer);
-      // 已经在飞的弹幕淡出后删掉，不要飘到别的页面上
-      Array.prototype.forEach.call(dmEl.children, function (s) {
-        s.style.transition = 'opacity .35s';
-        s.style.opacity = '0';
-        setTimeout(function () { s.remove(); }, 400);
-      });
-    }
-  };
-
-  // ------------------------------------------------------------ 开场
-
-  var introEl = document.getElementById('intro');
-
-  function intro(cards, done) {
-    if (reduce) { done(); return; }
-    var fan = cards.map(function (c, i) {
-      var mid = (cards.length - 1) / 2, k = i - mid;
-      return '<div class="in-card" style="--k:' + k + ';--i:' + i + ';--r:' + ((i * 37) % 24 - 12) + 'deg">' +
-        '<div class="in-face ' + c.team + '"><img src="avatars/' + c.id + '.svg" alt=""><b>' + c.name + '</b></div></div>';
-    }).join('');
-    introEl.innerHTML =
-      '<div class="in-sky"></div>' +
-      '<div class="in-words"><div class="in-line l1">天黑请闭眼</div><div class="in-line l2">天黑请闭眼</div>' +
-      '<div class="in-line l3">天黑请闭眼</div></div>' +
-      '<div class="in-lid top"></div><div class="in-lid bot"></div>' +
-      '<div class="in-cards">' + fan + '</div>' +
-      '<div class="in-title">狼人杀</div>' +
-      '<button class="in-skip" type="button">跳过</button>';
-    introEl.hidden = false;
-    introEl.className = 'play';
-    dm.start(4, 92);
-    var timers = [], fin = false;
-    function at(ms, fn) { timers.push(setTimeout(fn, ms)); }
-    function end() {
-      if (fin) return;
-      fin = true;
-      timers.forEach(clearTimeout);
-      introEl.classList.add('out');
-      dm.stop();
-      done();
-      setTimeout(function () { introEl.hidden = true; introEl.innerHTML = ''; introEl.className = ''; }, 520);
-    }
-    at(4300, function () { introEl.classList.add('fan'); });
-    at(6400, end);
-    introEl.onclick = end;
   }
 
   // ------------------------------------------------------------ 背景音乐
@@ -295,5 +199,5 @@
     })();
   }
 
-  window.FX = { intro: intro, dm: dm, bgm: bgm, reduce: reduce };
+  window.FX = { bgm: bgm };
 })();

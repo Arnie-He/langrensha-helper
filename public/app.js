@@ -379,12 +379,10 @@
     if (sky !== lastSky) {
       lastSky = sky;
       document.body.setAttribute('data-sky', sky);
-      var tc = { dusk: '#2a2019', night: '#0e0d0c', day: '#cdbd96', blood: '#2a0d0a', dawn: '#d3bf96' }[sky];
+      var tc = { dusk: '#221b15', night: '#0e0c0a', day: '#d6c7a1', blood: '#2b100c', dawn: '#d6c7a1' }[sky];
       var meta = document.querySelector('meta[name="theme-color"]');
       if (meta) meta.setAttribute('content', tc);
     }
-    document.body.classList.toggle('at-home', home);
-    if (home && !ui.claim && !ui.intro) FX.dm.start(1, 30); else if (!ui.intro) FX.dm.stop();
     // 背景音乐只在首页、大厅、结束页放；这台手机正在播报语音时先让开，播完再接着放。
     // 背景音乐的开关（FX.bgm.muted）和语音播报（Speaker）是两套互不相干的东西。
     FX.bgm.want((home || V.phase === 'lobby' || V.phase === 'over') && !Speaker.text);
@@ -401,11 +399,11 @@
         '掉线了，播报暂停</span><button class="btn sm" data-act="take-host">用我的手机播报</button></div>';
     }
     var bar = '';
-    if (V.you.host && Speaker.text) bar += '<div class="say">正在播报：' + esc(Speaker.text) + '</div>';
-    if (o.peek && V.me) bar += '<div class="peekrow"><button class="peekbtn" data-hold="1">按住看我的身份</button></div>';
+    if (V.you.host && Speaker.text) bar += '<div class="say">播报中…</div>';
+    if (o.peek && V.me) bar += '<div class="peekrow"><button class="peekbtn" data-hold="1">按住看身份</button></div>';
     bar += o.bar || '';
     return '<div class="screen ' + (o.cls || '') + '">' +
-      '<header class="top"><button class="code" data-act="qr">房间<b>' + V.code + '</b></button>' +
+      '<header class="top"><button class="code" data-act="qr" aria-label="房间号">' + V.code + '</button>' +
       '<div class="ttl">' + (o.title || '') + '</div>' +
       '<button class="more" data-act="menu" aria-label="菜单"><i></i><i></i><i></i></button></header>' +
       banners +
@@ -436,15 +434,52 @@
     return '<div class="ring" style="--sz:' + sz + 'px;--minw:' + minw + '"><div class="table">' + (center || tableDefault()) + '</div>' + slots + '</div>';
   }
   function tableDefault() {
-    if (V.phase === 'night') return '<div class="moon"></div><div class="sm">第 ' + V.night_no + ' 夜</div>';
+    if (V.phase === 'night') return '<div class="sm">第 ' + V.night_no + ' 夜</div>';
     if (V.phase === 'day') {
       var alive = V.seats.filter(function (s) { return s.alive; }).length;
-      return '<div class="sun"></div><div class="big">' + alive + '<small>/' + V.seats.length + '</small></div><div class="sm">存活</div>';
+      return '<div class="big">' + alive + '<small>/' + V.seats.length + '</small></div><div class="sm">存活</div>';
     }
     return '<div class="big">' + V.seats.length + '</div><div class="sm">人局</div>';
   }
 
-  // 一个座位格子。o.act 有值时可以点。
+  // 谁做完了、谁还没做。返回 {m: {座位: 'ok' | 'wait'}, words: [做完了的说法, 没做完的说法]}。
+  // 只在大家公开一起操作的环节用（看身份、上警、退水、投票、出局确认）；
+  // 夜里不显示，否则等于告诉所有人谁是什么身份。
+  function progress() {
+    var m = {}, words = ['', ''];
+    function mark(all, done) { (all || []).forEach(function (s) { m[s] = has(done, s) ? 'ok' : 'wait'; }); }
+    if (V.phase === 'deal') {
+      mark(V.seats.map(function (s) { return s.seat; }), V.deal.ready);
+      words = ['已就绪', '未就绪'];
+    } else if (V.phase === 'day') {
+      var d = V.day, e = d.elect;
+      if (d.stage === 'e_signup') { mark(e.players, e.decided); words = ['已选', '未选']; }
+      if (d.stage === 'e_withdraw') { mark(e.cands, e.decided); words = ['已选', '未选']; }
+      if (d.stage === 'e_vote' && e.vote) { mark(e.vote.voters, e.vote.voted); words = ['已投票', '未投票']; }
+      if (d.stage === 'vote' && d.vote) { mark(d.vote.voters, d.vote.voted); words = ['已投票', '未投票']; }
+      if (d.stage === 'settle' && d.settle) {
+        mark(d.settle.waiting.concat(d.settle.done || []), d.settle.done);
+        words = ['已确认', '待确认'];
+      }
+    }
+    return { m: m, words: words };
+  }
+  // 一行汇总：「已投票 7 / 12，未投票：3号、8号」
+  function progressLine(prog) {
+    var all = Object.keys(prog.m).map(Number).sort(function (a, b) { return a - b; });
+    if (!all.length) return '';
+    var left = all.filter(function (s) { return prog.m[s] !== 'ok'; });
+    return '<div class="progline"><i class="st ok"></i>' + prog.words[0] + ' ' + (all.length - left.length) + ' / ' + all.length +
+      (left.length ? '<i class="st wait"></i>' + prog.words[1] + '：' + nums(left) : '') + '</div>';
+  }
+  // 把上面的结果写进一个座位格子的参数里
+  function withProgress(o, prog, seat) {
+    var st = prog.m[seat];
+    if (st) { o.st = st; o.stw = prog.words[st === 'ok' ? 0 : 1]; }
+    return o;
+  }
+
+  // 一个座位格子。o.act 有值时可以点。o.st 是 'ok' / 'wait' 时，在座位旁边打一个「做完了 / 还没做」的记号。
   function tile(s, o) {
     o = o || {};
     var cls = ['seat'];
@@ -460,7 +495,13 @@
     var corner = s.seat === V.you.seat ? '我' : (s.host ? '房主' : '');
     var tag = o.tag || (s.shown ? role(s.shown).name : (!s.alive ? '出局' :
       (s.taken && !s.online ? '掉线' : (s.can_vote === false ? '无票' : ''))));
-    var inner = '<span class="tk">' + (s.sheriff ? '<i class="star" title="警长"></i>' : '') +
+    if (o.st) {
+      // 9 人以内座位之间有空，直接把「已投票 / 未投票」写在名字下面；
+      // 人再多就会互相压住，只留圆牌旁边的记号，文字看标题下面那一行汇总
+      if (V.seats.length <= 9) tag = (tag ? tag + '·' : '') + o.stw;
+      cls.push('st-' + o.st);
+    }
+    var inner = (o.st ? '<i class="st ' + o.st + '"></i>' : '') + '<span class="tk">' + (s.sheriff ? '<i class="star" title="警长"></i>' : '') +
       (corner ? '<i class="corner">' + corner + '</i>' : '') + (s.shown ? av(s.shown) : '') + '<b>' + s.seat + '</b></span>' +
       '<span class="nm">' + name + '</span>' + (tag ? '<i class="tg">' + tag + '</i>' : '') + (o.extra || '');
     if (o.act && !o.dis) {
@@ -486,10 +527,14 @@
       return role(r).name + (roles[r] > 1 ? '×' + roles[r] : '');
     }).join(' ');
   }
-  function lineup(roles) {
-    return '<div class="lineup">' + order().filter(function (r) { return roles[r]; }).map(function (r) {
-      return '<span>' + av(r) + role(r).name + (roles[r] > 1 ? '<em>×' + roles[r] + '</em>' : '') + '</span>';
-    }).join('') + '</div>';
+  // 板子的名字：是常规板子就用它的名字，否则写「12 人自定义」
+  function boardName() {
+    var roles = V.config.roles, ids = order();
+    var cur = JSON.stringify(ids.map(function (r) { return roles[r] || 0; })), hit = '';
+    info.presets.forEach(function (p) {
+      if (!hit && JSON.stringify(ids.map(function (r) { return p.roles[r] || 0; })) === cur) hit = p.name;
+    });
+    return hit || V.n + '人 自定义';
   }
   function rulesText() {
     var c = V.config;
@@ -519,49 +564,32 @@
 
   // ---------- 首页
 
-  // 首页那一手牌（开场动画最后也收成这一手）
-  var FAN = [['seer', '预言家', 'god'], ['witch', '女巫', 'god'], ['wolf', '狼人', 'wolf'],
-    ['hunter', '猎人', 'god'], ['villager', '村民', 'villager']];
-  function fanCards() {
-    return FAN.map(function (r, i) { return { id: r[0], name: r[1], team: r[2], k: i - (FAN.length - 1) / 2 }; });
-  }
-  var SND = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
+  var SND = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
     '<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/>' +
     '<path class="wave" d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/><path class="x" d="M16 9.5l5 5M21 9.5l-5 5"/></svg>';
 
   function homeScreen() {
-    var fan = '<div class="fan">' + fanCards().map(function (c) {
-      return '<div class="fc ' + c.team + '" style="--k:' + c.k + '">' + av(c.id) + '</div>';
-    }).join('') + '</div>';
     var hero = '<div class="hero">' +
       '<button class="snd' + (FX.bgm.muted ? ' off' : '') + '" data-act="snd" aria-label="背景音乐">' + SND + '</button>' +
-      fan + '<h1 class="title" data-act="replay"><span class="tt">狼人杀</span><i class="claw"></i><em>面杀助手</em></h1></div>';
-    if (cred) return '<div class="screen home"><main class="main" data-k="home">' + hero + '<p class="hint center" style="margin-top:24px">正在进入房间…</p></main></div>';
-    var name = '<label class="field"><span>你的昵称</span><input id="in-name" maxlength="8" placeholder="最多 8 个字" autocomplete="off" enterkeyhint="done"></label>';
-    var code = '<label class="field"><span>房间号</span><input id="in-code" class="codein" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="····" autocomplete="off" enterkeyhint="done"></label>';
+      '<h1 class="title">狼人杀</h1><p class="sub">面杀助手</p></div>';
+    if (cred) return '<div class="screen home"><main class="main" data-k="home">' + hero + '<p class="hint center">正在进入房间…</p></main></div>';
+    var name = '<label class="field"><input id="in-name" maxlength="8" placeholder="你的昵称" aria-label="你的昵称" autocomplete="off" enterkeyhint="done"></label>';
+    var code = '<label class="field"><input id="in-code" class="codein" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="房间号" aria-label="房间号" autocomplete="off" enterkeyhint="done"></label>';
     var body = fromLink
-      ? name + code + '<div class="stack">' + btn('加入房间', 'join', 'pri') + '</div>' +
-        '<div class="or">或者</div><div class="stack">' + btn('创建新房间，我当房主', 'create') + '</div>'
-      : name + '<div class="stack">' + btn('创建房间，我当房主', 'create', 'pri') + '</div>' +
-        '<div class="or">已经有房间了</div>' + code + '<div class="stack">' + btn('加入房间', 'join') + '</div>';
+      ? name + code + btn('加入房间', 'join', 'pri') + '<div class="or"></div>' + btn('创建新房间', 'create')
+      : name + btn('创建房间', 'create', 'pri') + '<div class="or"></div>' + code + btn('加入房间', 'join');
     return '<div class="screen home"><main class="main" data-k="home">' + hero +
-      '<div class="card panel">' + body + '</div></main></div>';
-  }
-
-  function playIntro() {
-    ui.intro = true;
-    FX.dm.stop();
-    FX.intro(fanCards(), function () { ui.intro = false; paintSky(); });
+      '<div class="panel stack">' + body + '</div></main></div>';
   }
 
   function claimScreen() {
     var c = ui.claim, list = c.claim || [];
     var body = list.length
-      ? '<p class="hint" style="margin-bottom:12px">如果你是中途换了手机或浏览器，点你原来的座位就能回到游戏。</p>' +
+      ? '<p class="hint" style="margin-bottom:12px">点你原来的座位回到游戏。</p>' +
         '<div class="stack">' + list.map(function (s) {
           return btn(s.seat + ' 号　' + esc(s.name), 'claim', '', false, ' data-seat="' + s.seat + '"');
         }).join('') + '</div>'
-      : '<p class="hint">这一局已经开始，而且没有掉线的座位。等这局结束再进来吧。</p>';
+      : '<p class="hint center">这一局已经开始，等结束再进来。</p>';
     return '<div class="screen home"><main class="main" data-k="claim">' +
       '<div class="logo"><h1>房间 ' + esc(c.code) + '</h1><p>游戏已经开始了</p></div>' + body +
       '<div class="stack" style="margin-top:20px">' + btn('返回', 'claim-back') + '</div></main></div>';
@@ -573,53 +601,58 @@
     var me = V.you, n = V.n;
     var taken = V.seats.filter(function (s) { return s.taken; }).length;
     var off = V.seats.filter(function (s) { return s.taken && !s.online; }).length;
-    var others = V.standing - (me.seat ? 0 : 1);
     var main =
       '<div class="card lobbyhd"><button class="qrbtn" data-act="qr" aria-label="放大二维码"><img class="qr" src="' + qrSrc() + '" alt="进房二维码"></button>' +
-      '<button class="txt" data-act="qr"><div class="lbl">房间号 · 扫码进房</div><div class="digits">' + V.code + '</div></button>' +
-      btn(me.host ? '改板子' : '看规则', me.host ? 'config' : 'menu', 'sm') +
-      '<div class="brd">' + lineup(V.config.roles) + '<div class="hint">' + n + ' 人局，' + rulesText() + '</div>' +
-      (V.err ? '<div class="warn-t">' + esc(V.err) + '</div>' : '') + '</div></div>' +
+      '<button class="txt" data-act="qr"><div class="digits">' + V.code + '</div><div class="hint">' + esc(boardName()) + '</div></button>' +
+      btn(me.host ? '改板子' : '规则', me.host ? 'config' : 'menu', 'sm') +
+      (V.err ? '<div class="warn-t">' + esc(V.err) + '</div>' : '') + '</div>' +
       grid(function (s) {
         if (!s.taken) return tile(s, { act: 'sit' });
         if (s.seat === me.seat) return tile(s, { act: 'stand' });
         return tile(s, me.host ? { act: 'kick' } : {});
       }, '<div class="big">' + taken + '<small>/' + n + '</small></div><div class="sm">' +
-        (taken < n ? (me.seat ? '等人入座' : '点空位坐下') : '人齐了') + '</div>') +
-      '<p class="hint center">按实际围坐的顺序坐：1 号旁边是 2 号，依次排下去。' +
-      (others ? '<br>还有 ' + others + ' 人进了房间没入座。' : '') + '</p>';
+        (taken < n ? (me.seat ? '等人入座' : '点空位入座') : '人齐了') + '</div>');
     var bar;
     if (me.host) {
-      var why = V.err ? '板子还不能开局' : taken < n ? '还差 ' + (n - taken) + ' 人入座' : off ? '有人掉线了' : '';
+      var why = V.err ? '板子不能开局' : taken < n ? '还差 ' + (n - taken) + ' 人' : off ? '有人掉线' : '';
       bar = row(btn('试音', 'test'), btn(why || '发牌', 'deal', 'pri', !!why));
     } else {
-      bar = wait(me.seat ? '你坐在 ' + me.seat + ' 号，等房主发牌' : '点一个空位坐下');
+      bar = wait(me.seat ? '等房主发牌' : '点空位入座');
     }
-    return frame({ title: '等待入座', main: main, bar: bar });
+    return frame({ title: '入座', main: main, bar: bar, cls: 'lobby' });
   }
 
   // ---------- 发牌：看身份
 
+  // 每个座位一枚小圆牌：看完身份的打勾，没看完的是虚线圈
+  function readyStrip() {
+    var prog = progress(), n = V.seats.length;
+    var left = V.seats.filter(function (s) { return prog.m[s.seat] !== 'ok'; }).map(function (s) { return s.seat; });
+    return '<div class="progress">已就绪 ' + (n - left.length) + ' / ' + n + '</div>' +
+      '<div class="ready">' + V.seats.map(function (s) {
+        return '<span class="' + prog.m[s.seat] + '"><b>' + s.seat + '</b></span>';
+      }).join('') + '</div>';
+  }
+
   function dealScreen() {
     var d = V.deal, n = V.seats.length, main, bar;
     if (!V.me) {
-      main = '<div class="sleep"><h1>本局旁观</h1><p>你没有入座，这一局只能看</p></div>';
+      main = '<div class="sleep"><h1>本局旁观</h1></div>' + readyStrip();
       bar = '';
     } else {
-      main = '<button class="idcard" data-hold="1"><span class="art"></span><div class="lbl">你是 ' + V.you.seat + ' 号</div>' +
-        '<div class="big">按住这里看身份</div><div class="hint">用手挡一下屏幕，松手就会藏起来</div></button>' +
-        '<div class="progress">已看完身份 ' + d.count + ' / ' + n + '</div>';
+      main = '<button class="idcard" data-hold="1"><span class="art"></span><div class="big">按住看身份</div></button>' +
+        readyStrip();
       if (!d.seen) {
-        bar = btn(ui.peeked ? '我记住了' : '先按住上面看身份', 'seen', 'pri', !ui.peeked);
+        bar = btn(ui.peeked ? '我记住了' : '先看身份', 'seen', 'pri', !ui.peeked);
       } else if (V.you.host) {
         var all = d.count >= n;
         bar = btn(all ? '天黑请闭眼' : '还有 ' + (n - d.count) + ' 人没看完', 'start-night', 'pri', !all) +
-          (all ? '' : '<button class="link" data-act="force-night">不等了，直接开始</button>');
+          (all ? '' : '<button class="link" data-act="force-night">直接开始</button>');
       } else {
-        bar = wait('等其他人看完，房主会宣布天黑');
+        bar = wait('等其他人看完');
       }
     }
-    return frame({ title: '查看身份', main: main, bar: bar });
+    return frame({ title: '看身份', main: main, bar: bar });
   }
 
   // ---------- 夜晚
@@ -627,9 +660,9 @@
   function nightScreen() {
     var p = V.night.prompt, me = V.you.seat, title = '第 ' + V.night_no + ' 夜', main, bar = '';
     if (!p) {
-      main = '<div class="sleep"><div class="moon"></div><h1>天黑请闭眼</h1><p>' +
-        (V.me && !V.me.alive ? '你已出局，也请闭眼，不要出声' : '听到语音叫你的身份，再睁眼看手机') + '</p>' +
-        (V.you.host ? '<div class="hostnote">你的手机负责播报：放在桌子中间，音量调大，保持亮屏。</div>' : '') + '</div>';
+      main = '<div class="sleep"><div class="moon"></div><h1>天黑请闭眼</h1>' +
+        (V.me && !V.me.alive ? '<p>你已出局</p>' : '') +
+        (V.you.host ? '<div class="hostnote">本机负责播报，请保持亮屏</div>' : '') + '</div>';
       return frame({ title: title, main: main, cls: 'night', peek: true, key: 'sleep' });
     }
     var red = p.tone === 'red';
@@ -642,7 +675,7 @@
 
     if (p.ui === 'result') {
       var rid = roleIdByName(p.big);
-      var pic = rid ? medal(rid) : p.tone === 'bad' ? art('emblem_wolf', 'emblem') : p.tone === 'good' ? art('emblem_good', 'emblem') : '';
+      var pic = rid ? medal(rid) : '';
       main = '<div class="result ' + (p.tone || 'plain') + '"><div class="lbl">' + esc(p.title) + '</div>' + pic + '<div class="big">' + esc(p.big) + '</div>' +
         (p.lines || []).map(function (l) { return '<p>' + esc(l) + '</p>'; }).join('') + '</div>';
       bar = btn(esc(p.ok), 'night-ok', 'pri');
@@ -659,22 +692,16 @@
 
     if (p.ui === 'wolf') {
       var mine = p.picks[me];
-      var chips = p.wolves.map(function (w) {
-        var k = p.picks[w];
-        var t = k === undefined ? '还没选' : k === 0 ? '空刀' : '刀 ' + k + ' 号';
-        return '<span class="' + (k === undefined ? 'none' : '') + '">' + (w === me ? '我' : w + '号') + '：' + t + '</span>';
-      }).join('');
       var extra = '';
       if (p.double) {
         extra = '<div class="card opt"><div class="txt"><div class="lbl">双刀（整局一次）</div><div class="t">' +
           (ui.mode === 'extra' ? '点一名玩家作为第二刀' : p.extra ? '第二刀：<em>' + p.extra + ' 号</em>' : '今晚不用') +
-          '</div><div class="hint">两刀砍同一人，可以无视解药和守护。</div></div>' +
+          '</div></div>' +
           btn(ui.mode === 'extra' ? '取消' : p.extra ? '撤回' : '选第二刀', 'wolf-extra', 'sm') + '</div>';
       }
       var solo = p.wolves.length === 1;
-      main = ask(solo ? '由你选今晚的目标' : '狼人，选今晚的目标',
-        solo ? '选好后点确认。' : '所有狼人选中同一个人，再由任意一人确认。') +
-        '<div class="picks">' + chips + '</div>' + extra +
+      main = ask('狼人，选今晚的目标', solo ? '' : '全体选同一人后确认。') +
+        extra +
         grid(function (s) {
           var marks = p.wolves.filter(function (w) { return p.picks[w] === s.seat; })
             .map(function (w) { return '<i>' + w + '</i>'; }).join('');
@@ -690,32 +717,31 @@
             extra: marks ? '<span class="marks">' + marks + '</span>' : ''
           });
         });
-      var lab = p.agreed === null ? (solo ? '先选一名玩家' : '等所有狼人选同一目标') :
+      var lab = p.agreed === null ? (solo ? '先选一名玩家' : '等全体选同一人') :
         p.agreed === 0 ? '确认空刀' : '确认击杀 ' + p.agreed + ' 号';
       bar = row(btn(mine === 0 ? '已选空刀' : '空刀', 'wolf-none'), btn(lab, 'wolf-ok', 'red', p.agreed === null));
     }
 
     if (p.ui === 'witch') {
       if (ui.mode === 'poison') {
-        main = ask('选一名玩家下毒', '毒药只有一瓶，用了就没有了。') + pickGrid(p.targets, true);
+        main = ask('选一名玩家下毒') + pickGrid(p.targets, true);
         bar = row(btn('返回', 'witch-back'), btn(ui.picks.length ? '确认毒 ' + ui.picks[0] + ' 号' : '先选一名玩家', 'witch-poison-ok', 'red', !ui.picks.length));
       } else {
         var a;
         if (!p.antidote) {
-          a = '<div class="card opt gone">' + art('potion_save', 'potion') + '<div class="txt"><div class="lbl">解药</div><div class="t">已经用掉了，所以不知道今晚谁倒牌</div></div></div>';
+          a = '<div class="card opt gone">' + art('potion_save', 'potion') + '<div class="txt"><div class="t">解药已用掉</div></div></div>';
         } else if (!p.victim) {
-          a = '<div class="card opt gone">' + art('potion_save', 'potion') + '<div class="txt"><div class="lbl">解药</div><div class="t">今晚没有人倒牌</div></div></div>';
+          a = '<div class="card opt gone">' + art('potion_save', 'potion') + '<div class="txt"><div class="t">今晚没有人倒牌</div></div></div>';
         } else {
-          a = '<div class="card opt">' + art('potion_save', 'potion') + '<div class="txt"><div class="lbl">解药</div><div class="t">今晚倒牌的是 <em>' + p.victim + ' 号' +
-            (p.victim === me ? '（你自己）' : ' ' + esc(seatOf(p.victim).name)) + '</em></div>' +
-            (p.can_save ? '' : '<div class="hint">按本局规则，你不能自救。</div>') + '</div>' +
+          a = '<div class="card opt">' + art('potion_save', 'potion') + '<div class="txt"><div class="t"><em>' + p.victim + ' 号' + (p.victim === me ? '（你）' : '') + '</em> 倒牌</div>' +
+            (p.can_save ? '' : '<div class="hint">不能自救</div>') + '</div>' +
             (p.can_save ? btn('救人', 'witch-save', 'sm pri') : '') + '</div>';
         }
         var b = p.poison
-          ? '<div class="card opt">' + art('potion_poison', 'potion') + '<div class="txt"><div class="lbl">毒药</div><div class="t">还有一瓶</div></div>' + btn('下毒', 'witch-poison', 'sm red') + '</div>'
-          : '<div class="card opt gone">' + art('potion_poison', 'potion') + '<div class="txt"><div class="lbl">毒药</div><div class="t">已经用掉了</div></div></div>';
-        main = ask('女巫，决定是否用药', '同一晚只能用一瓶。') + a + b;
-        bar = btn('今晚不用药', 'witch-none');
+          ? '<div class="card opt">' + art('potion_poison', 'potion') + '<div class="txt"><div class="t">毒药</div></div>' + btn('下毒', 'witch-poison', 'sm red') + '</div>'
+          : '<div class="card opt gone">' + art('potion_poison', 'potion') + '<div class="txt"><div class="t">毒药已用掉</div></div></div>';
+        main = ask('女巫，是否用药', '一晚只能用一瓶。') + a + b;
+        bar = btn('不用药', 'witch-none');
       }
     }
     return frame({ title: title, main: main, bar: bar, cls: 'night', key: p.type + p.ui + (ui.mode || '') });
@@ -756,10 +782,10 @@
       var alive = V.seats.filter(function (s) { return s.alive && s.seat !== me.seat; }).map(function (s) { return s.seat; });
       var t0 = ui.picks[0];
       if (ui.mode === 'ww') {
-        head = stage('白狼王自爆', '<p>选一名玩家带走，也可以不带人。自爆后直接进入黑夜。</p>');
+        head = stage('白狼王自爆', '<p>可以带走一名玩家。</p>');
         bar = row(btn('取消', 'mode-cancel'), btn(t0 ? '自爆并带走 ' + t0 + ' 号' : '不带人，直接自爆', 'ww-ok', 'red'));
       } else {
-        head = stage('骑士决斗', '<p>选一名玩家决斗：他是狼人则他出局并立刻天黑；他是好人则你出局。整局只有一次。</p>');
+        head = stage('骑士决斗', '<p>对方是狼人则他出局，否则你出局。</p>');
         bar = row(btn('取消', 'mode-cancel'), btn(t0 ? '和 ' + t0 + ' 号决斗' : '先选一名玩家', 'duel-ok', 'red', !t0));
       }
       return frame({ title: '第 ' + d.no + ' 天', main: head + pickGrid(alive, true), bar: bar, key: 'daymode' });
@@ -767,44 +793,38 @@
 
     // ---- 警长竞选
     if (d.stage === 'e_signup') {
-      var left1 = e.players.filter(function (s) { return !has(e.decided, s); });
       if (e.mine === 'signup') {
-        head = stage('警长竞选：你要上警吗？', '<p>大家同时选择，全部选完才会公布谁上警。上警的人不参加第一轮投票。</p>');
+        head = stage('你要上警吗？');
         bar = row(btn('不上警', 'elect-run', '', false, ' data-v="0"'), btn('上警', 'elect-run', 'pri', false, ' data-v="1"'));
       } else {
-        head = stage('警长竞选', '<p>已选择 ' + e.decided.length + ' / ' + e.players.length + '。' + (left1.length ? '还没选：' + nums(left1) + '。' : '') + '</p>');
-        bar = host ? btn('不等了（没选的算不上警）', 'elect-close') : wait('等所有人选完');
+        head = stage('警长竞选');
+        bar = host ? btn('不等了', 'elect-close') : wait('等所有人选完');
       }
     }
     if (d.stage === 'e_speech' || d.stage === 'e_pk') {
       var pk = d.stage === 'e_pk';
-      head = stage(pk ? '警长竞选平票 PK' : '竞选发言',
-        '<p>' + (pk ? 'PK 玩家' : '上警玩家') + '：<b>' + nums(e.cands) + '</b></p>' +
-        '<p>发言顺序：<b>' + seq(e.order) + '</b></p>' +
-        '<p>' + (pk ? '发言结束后，警下和退水的玩家再投一轮。' : '发言结束后进入退水环节。') + '狼人可以在右上角菜单里自爆。</p>');
-      bar = host ? btn(pk ? '发言结束，开始 PK 投票' : '发言结束，进入退水环节', 'elect-next', 'pri') : wait('等房主推进到下一步');
+      head = stage(pk ? '警长平票 PK' : '竞选发言',
+        '<p>发言顺序：<b>' + seq(e.order) + '</b></p>');
+      bar = host ? btn(pk ? '开始 PK 投票' : '进入退水环节', 'elect-next', 'pri') : wait('发言中');
     }
     if (d.stage === 'e_withdraw') {
-      var left2 = e.cands.filter(function (s) { return !has(e.decided, s); });
       if (e.mine === 'withdraw') {
-        head = stage('退水环节：你要退水吗？', '<p>退水就是退出竞选。退水后第一轮不能投票，平票 PK 时可以投。大家同时选择。</p>');
+        head = stage('你要退水吗？');
         bar = row(btn('退水', 'elect-wd', '', false, ' data-v="1"'), btn('留在警上', 'elect-wd', 'pri', false, ' data-v="0"'));
       } else {
-        head = stage('退水环节', '<p>警上玩家正在决定是否退水。' + (left2.length ? '还没选：' + nums(left2) + '。' : '') + '狼人可以在右上角菜单里自爆。</p>');
-        bar = host ? btn('不等了（没选的算不退水）', 'elect-close') : wait('等警上玩家选完');
+        head = stage('退水环节');
+        bar = host ? btn('不等了', 'elect-close') : wait('等警上玩家选完');
       }
     }
     if (d.stage === 'e_vote') {
-      var ev = e.vote, left3 = ev.voters.filter(function (s) { return !has(ev.voted, s); });
+      var ev = e.vote;
       if (e.mine === 'vote') {
-        head = stage((ev.round === 2 ? 'PK 投票' : '警长投票') + '：你选谁当警长？', '<p>投出后不能改。</p>');
+        head = stage(ev.round === 2 ? 'PK：选谁当警长？' : '选谁当警长？');
         pick = function (s) { return { act: 'pick', dis: !has(ev.cands, s.seat), sel: has(ui.picks, s.seat) }; };
         bar = row(btn('弃票', 'elect-vote-none'), btn(ui.picks.length ? '投给 ' + ui.picks[0] + ' 号' : '先选一名玩家', 'elect-vote-ok', 'pri', !ui.picks.length));
       } else {
-        head = stage('警长投票中 ' + ev.voted.length + ' / ' + ev.voters.length,
-          '<p>候选人：<b>' + nums(ev.cands) + '</b>。' + (ev.round === 2 ? '警下和退水的玩家投票。' : '只有警下玩家投票。') +
-          (left3.length ? '还没投：' + nums(left3) + '。' : '') + '</p>');
-        bar = host ? btn('结束投票（没投的算弃票）', 'elect-close') : wait(ev.round === 2 ? '等大家投完' : '等警下玩家投完');
+        head = stage(ev.round === 2 ? '警长 PK 投票' : '警长投票');
+        bar = host ? btn('结束投票', 'elect-close') : wait('投票中');
       }
     }
 
@@ -812,58 +832,57 @@
     if (d.stage === 'settle') {
       var st = d.settle, mine = st.mine;
       if (mine && mine.can_shoot && ui.shot === null) {
-        head = stage('你出局了，可以发动技能', '<p>选一名玩家带走，或者选择不发动。</p>');
+        head = stage('你出局了，可以带走一人');
         pick = function (s) { return { act: 'pick', dis: !has(st.targets, s.seat), sel: has(ui.picks, s.seat), cls: 'kill' }; };
         bar = row(btn('不发动', 'shot-none'), btn(ui.picks.length ? '带走 ' + ui.picks[0] + ' 号' : '先选一名玩家', 'shot-ok', 'red', !ui.picks.length));
       } else if (mine && mine.badge) {
-        head = stage('你是警长：警徽交给谁？', '<p>选一名活着的玩家接任警长，或者撕掉警徽。</p>');
+        head = stage('警徽交给谁？');
         pick = function (s) { return { act: 'pick', dis: !has(st.targets, s.seat) || s.seat === ui.shot, sel: has(ui.picks, s.seat) }; };
         bar = row(btn('撕掉警徽', 'badge-tear'), btn(ui.picks.length ? '移交给 ' + ui.picks[0] + ' 号' : '先选一名玩家', 'badge-ok', 'pri', !ui.picks.length));
       } else if (mine) {
         var gun = V.me && (V.me.role === 'hunter' || V.me.role === 'wolfking');
-        head = stage('你出局了', '<p>' + (gun ? '这次你不能发动技能。' : '') + '点下面的按钮确认，游戏才会继续。</p>');
+        head = stage('你出局了', gun ? '<p>这次不能发动技能。</p>' : '');
         bar = btn('确认', 'settle-ok', 'pri');
       } else {
-        head = stage('等待出局玩家确认', '<p>' + nums(st.waiting) + ' 正在手机上确认。</p>');
+        head = stage('等出局玩家确认');
       }
     }
 
     // ---- 发言 / 天黑前
     if (d.stage === 'discuss' || d.stage === 'dusk') {
-      var lw = d.last_words.length ? '<p>请 <b>' + nums(d.last_words) + '</b> 发表遗言。</p>' : '';
+      var lw = d.last_words.length ? '<p><b>' + nums(d.last_words) + '</b> 发表遗言</p>' : '';
       if (d.stage === 'dusk') {
         head = stage('今天结束了', lw);
         bar = host ? btn('天黑请闭眼', 'start-night', 'pri') : wait('等房主宣布天黑');
       } else if (d.order && d.order.mine) {
-        head = stage('警长，请决定发言顺序', lw + '<p>点一个顺序。你最后一个发言。</p>') +
+        head = stage('警长，选发言顺序', lw) +
           '<div class="stack" style="margin-bottom:14px">' + d.order.opts.map(function (o, i) {
             return btn(seq(ring(o.start, o.dir)), 'order', '', false, ' data-i="' + i + '"');
           }).join('') + '</div>';
-        bar = host ? btn('发言结束，开始投票', 'start-vote', 'pri') : wait('发言结束后，房主会发起投票');
+        bar = host ? btn('开始投票', 'start-vote', 'pri') : wait('发言中');
       } else {
         var sp = d.speak;
-        head = stage('发言时间', lw +
-          (d.order ? '<p>等警长（' + d.sheriff + ' 号）决定发言顺序。</p>' : '') +
+        head = stage('发言', lw +
+          (d.order ? '<p>等警长选发言顺序</p>' : '') +
           (sp ? '<p>发言顺序：<b>' + seq(ring(sp.start, sp.dir)) + '</b></p>' : ''));
-        bar = host ? btn('发言结束，开始投票', 'start-vote', 'pri') : wait('发言结束后，房主会发起投票');
+        bar = host ? btn('开始投票', 'start-vote', 'pri') : wait('发言中');
       }
     }
 
     if (d.stage === 'pk') {
-      head = stage('平票 PK', '<p>请 <b>' + nums(d.pk) + '</b> 依次发言，然后其他人再投一轮。</p>');
-      bar = host ? btn('开始 PK 投票', 'start-vote', 'pri') : wait('PK 发言结束后，房主会发起投票');
+      head = stage('平票 PK', '<p><b>' + nums(d.pk) + '</b> 发言</p>');
+      bar = host ? btn('开始 PK 投票', 'start-vote', 'pri') : wait('发言中');
     }
 
     if (d.stage === 'vote') {
-      var v = d.vote, left = v.voters.filter(function (s) { return !has(v.voted, s); });
+      var v = d.vote;
       if (v.can) {
-        head = stage((v.round === 2 ? 'PK 投票' : '投票') + '：你要放逐谁？', '<p>投出后不能改。' + (d.sheriff === me.seat ? '你是警长，这一票算 1.5 票。' : '') + '</p>');
+        head = stage(v.round === 2 ? 'PK：放逐谁？' : '放逐谁？');
         pick = function (s) { return { act: 'pick', dis: !has(v.cands, s.seat), sel: has(ui.picks, s.seat), cls: 'kill' }; };
         bar = row(btn('弃票', 'vote-none'), btn(ui.picks.length ? '投给 ' + ui.picks[0] + ' 号' : '先选一名玩家', 'vote-ok', 'red', !ui.picks.length));
       } else {
-        var why = !has(v.voters, me.seat) ? '你这一轮不投票。' : '你已经投了。';
-        head = stage('投票中 ' + v.voted.length + ' / ' + v.voters.length, '<p>' + why + (left.length ? '还没投：' + nums(left) + '。' : '') + '</p>');
-        bar = host ? btn('结束投票（没投的算弃票）', 'end-vote') : wait('等所有人投完');
+        head = stage('投票中');
+        bar = host ? btn('结束投票', 'end-vote') : wait('投票中');
       }
     }
 
@@ -874,11 +893,12 @@
     // 重要的东西不用往下滑：最新一条消息紧跟在标题下面；刚投完票时，票型排在座位前面
     var latest = d.feed.length ? '<div class="latest">' + esc(d.feed[d.feed.length - 1]) + '</div>' : '';
     var resFirst = !pick && res && has(['wait', 'settle', 'e_pk', 'pk', 'dusk'], d.stage);
-    var main = head + latest + (resFirst ? res : '') + grid(function (s) {
+    var prog = progress();
+    var main = head + progressLine(prog) + latest + (resFirst ? res : '') + grid(function (s) {
       var o = pick ? pick(s) : {};
       if (inElection && !o.tag) o.tag = has(e.cands, s.seat) ? '警上' : has(e.withdrawn, s.seat) ? '已退水' : '';
-      return tile(s, o);
-    }) + (d.feed.length > 1 ? '<div class="sec-t">今天发生的事</div>' + feed : '') + (resFirst ? '' : res);
+      return tile(s, withProgress(o, prog, s.seat));
+    }) + (resFirst ? '' : res) + (d.feed.length > 1 ? '<div class="sec-t">今天</div>' + feed : '');
     return frame({ title: '第 ' + d.no + ' 天 · ' + (names[d.stage] || ''), main: main, bar: bar, peek: true, key: 'day' + d.stage });
   }
 
@@ -886,9 +906,9 @@
 
   function overScreen() {
     var o = V.over, w = o.winner;
-    var ttl = { good: '好人阵营获胜', wolf: '狼人阵营获胜', third: '情侣阵营获胜' }[w];
+    var ttl = { good: '好人获胜', wolf: '狼人获胜', third: '情侣获胜' }[w];
     var mine = V.me ? o.camps[V.you.seat] : null;
-    var main = '<div class="verdict ' + w + '">' + (w === 'wolf' ? art('emblem_wolf', 'emblem') : w === 'good' ? art('emblem_good', 'emblem') : '') + '<h1>' + ttl + '</h1>' +
+    var main = '<div class="verdict ' + w + '"><h1>' + ttl + '</h1>' +
       '<p>' + (V.me ? '你是' + role(V.me.role).name + '，' + (mine === w ? '赢了' : '输了') : '') + '</p></div>' +
       grid(function (s) {
         var c = o.causes[s.seat], love = has(o.lovers, s.seat);
@@ -899,7 +919,7 @@
       }) +
       '<div class="sec-t">复盘</div><div class="card log">' + o.log.map(function (t) { return '<p>' + esc(t) + '</p>'; }).join('') + '</div>';
     var bar = V.you.host ? btn('再来一局', 'again', 'pri') : wait('等房主开下一局');
-    return frame({ title: '游戏结束', main: main, bar: bar });
+    return frame({ title: '结束', main: main, bar: bar });
   }
 
   // ---------- 按住看身份
@@ -914,8 +934,8 @@
         }).join('、') : '你没有同伴');
       }
       (me.notes || []).forEach(function (t) { notes.push(esc(t)); });
-      html = '<div class="pk ' + r.team + '"><div class="who">' + V.you.seat + ' 号 ' + esc(V.you.name) + '</div>' +
-        medal(me.role) + '<div class="role">' + r.name + '</div><div class="team">' + art(r.team === 'wolf' ? 'emblem_wolf' : 'emblem_good', 'chip') + (r.team === 'wolf' ? '狼人阵营' : '好人阵营') + '</div>' +
+      html = '<div class="pk ' + r.team + '">' + medal(me.role) + '<div class="who">' + V.you.seat + ' 号</div>' +
+        '<div class="role">' + r.name + '</div><div class="team">' + (r.team === 'wolf' ? '狼人阵营' : '好人阵营') + '</div>' +
         '<div class="desc">' + esc(r.desc) + '</div>' +
         (notes.length ? '<div class="notes">' + notes.join('<br>') + '</div>' : '') + '</div>';
     }
@@ -930,8 +950,8 @@
     if (s && (V || s.type === 'confirm')) {
       var body = '';
       if (s.type === 'qr') {
-        body = '<h2>扫码进房间</h2><img class="qrbig" src="' + qrSrc() + '" alt="进房二维码">' +
-          '<div class="url">' + esc(joinUrl()) + '<br>房间号 ' + V.code + '</div>' + btn('关闭', 'close');
+        body = '<h2>房间 ' + V.code + '</h2><img class="qrbig" src="' + qrSrc() + '" alt="进房二维码">' +
+          '<div class="url">' + esc(joinUrl()) + '</div>' + btn('关闭', 'close');
       } else if (s.type === 'confirm') {
         body = '<h2>' + s.title + '</h2><div class="body">' + (s.text || '') + '</div>' +
           (s.run ? '<div class="bar" style="padding:0;background:none">' + row(btn('取消', 'close'), btn(s.ok, 'confirm-ok', s.danger ? 'red' : 'pri')) + '</div>'
@@ -941,7 +961,7 @@
       } else if (s.type === 'config') {
         body = configHtml();
       }
-      html = '<div class="mask" data-act="close"></div><div class="wrap"><i class="torn"></i><div class="box">' + body + '</div></div>';
+      html = '<div class="mask" data-act="close"></div><div class="box">' + body + '</div>';
     }
     if (html !== lastSheet) {
       var box = sheetEl.querySelector('.box'), top = box ? box.scrollTop : 0;
@@ -970,13 +990,13 @@
     items += '<div class="body"><b>' + V.seats.length + ' 人局</b>　' + boardText(V.config.roles) + '<br>' + rulesText() +
       '<br>夜晚顺序：' + nightOrderText() + '</div>';
     if (ph === 'day' && V.me && V.me.alive) {
-      if (has(['discuss', 'pk', 'e_speech', 'e_withdraw', 'e_pk'], d.stage)) items += btn('自爆（仅狼人可用）', 'boom');
-      if (d.stage === 'discuss') items += btn('骑士决斗（仅骑士可用）', 'duel');
+      if (has(['discuss', 'pk', 'e_speech', 'e_withdraw', 'e_pk'], d.stage)) items += btn('自爆（狼人）', 'boom');
+      if (d.stage === 'discuss') items += btn('决斗（骑士）', 'duel');
     }
     items += btn(FX.bgm.muted ? '打开背景音乐' : '关闭背景音乐', 'snd');
     if (host && ph === 'lobby') items += btn('试音', 'test');
-    if (host && ph === 'night') items += btn('跳过当前环节（有人没反应时用）', 'skip');
-    if (host && ph !== 'lobby') items += btn('结束本局，回到大厅', 'abort');
+    if (host && ph === 'night') items += btn('跳过当前环节', 'skip');
+    if (host && ph !== 'lobby') items += btn('结束本局', 'abort');
     items += btn('离开房间', 'leave');
     items += btn('关闭', 'close', 'pri');
     return '<h2>菜单</h2><div class="menu stack">' + items + '</div>';
@@ -994,7 +1014,7 @@
       var count = list.reduce(function (a, r) { return a + (roles[r.id] || 0); }, 0);
       return '<div class="grp">' + title + '<span>' + count + ' 人</span></div>' + list.map(function (r) {
         var v = roles[r.id] || 0, multi = r.id === 'wolf' || r.id === 'villager';
-        return '<div class="step' + (v ? ' on' : '') + '"><button class="nm" data-act="role-info" data-r="' + r.id + '">' + av(r.id) + '<span>' + r.name + '<small>点名字看技能</small></span></button>' +
+        return '<div class="step' + (v ? ' on' : '') + '"><button class="nm" data-act="role-info" data-r="' + r.id + '">' + av(r.id) + '<span>' + r.name + '</span></button>' +
           '<div class="ctl"><button data-act="step" data-r="' + r.id + '" data-d="-1"' + (v <= 0 ? ' disabled' : '') + '>−</button><b>' + v + '</b>' +
           '<button data-act="step" data-r="' + r.id + '" data-d="1"' + ((!multi && v >= 1) || V.n >= 18 ? ' disabled' : '') + '>+</button></div></div>';
       }).join('');
@@ -1004,16 +1024,16 @@
         return '<button class="' + (String(c[key]) === o[0] ? 'on' : '') + '" data-act="opt" data-k="' + key + '" data-v="' + o[0] + '">' + o[1] + '</button>';
       }).join('') + '</div>';
     }
-    return '<h2>板子：共 ' + V.n + ' 人</h2>' +
+    return '<h2>板子 · ' + V.n + ' 人</h2>' +
       (V.err ? '<div class="warn-t" style="margin-bottom:10px">' + esc(V.err) + '</div>' : '<div class="hint" style="margin-bottom:10px">' + boardText(roles) + '</div>') +
-      '<div class="seg-t">常规板子（点一下直接套用）</div><div class="chips">' + chips + '</div>' +
-      '<div class="seg-t">自定义：每个身份几张</div>' +
+      '<div class="seg-t">常规板子</div><div class="chips">' + chips + '</div>' +
+      '<div class="seg-t">自定义（点身份看技能）</div>' +
       group('狼人阵营', function (r) { return r.team === 'wolf'; }) +
       group('平民', function (r) { return r.kind === 'villager'; }) +
       group('神职', function (r) { return r.kind === 'god'; }) +
-      '<div class="seg-t">警长竞选（上警）</div>' + seg('sheriff', [['true', '有'], ['false', '没有']]) +
+      '<div class="seg-t">警长竞选</div>' + seg('sheriff', [['true', '有'], ['false', '没有']]) +
       '<div class="seg-t">女巫自救</div>' + seg('witch_self_save', [['first', '仅首夜'], ['never', '不可以'], ['always', '可以']]) +
-      '<div class="seg-t">狼人获胜条件</div>' + seg('win', [['side', '屠边（神或民死光）'], ['all', '屠城（好人死光）']]) +
+      '<div class="seg-t">狼人获胜条件</div>' + seg('win', [['side', '屠边'], ['all', '屠城']]) +
       '<div style="height:16px"></div>' + btn('完成', 'close', 'pri');
   }
 
@@ -1046,7 +1066,6 @@
       // 通用
       case 'unlock': return;                     // 全局点击已经处理了解锁
       case 'snd': FX.bgm.toggle(); lastHtml = ''; lastSheet = ''; return paint();
-      case 'replay': return playIntro();
       case 'close': ui.sheet = (ui.sheet && ui.sheet.back) || null; return paint();
       case 'qr': ui.sheet = { type: 'qr' }; return paint();
       case 'menu': ui.sheet = { type: 'menu' }; return paint();
@@ -1230,8 +1249,8 @@
   fetch('/api/info').then(function (r) { return r.json(); }).then(function (j) {
     info = j;
     j.roles.forEach(function (r) { ROLE[r.id] = r; new Image().src = avSrc(r.id); });
-    ['cardback', 'frame_dark', 'frame_red', 'frame_gold', 'token_dim', 'token_red', 'ring_red', 'ring_gold', 'cross', 'sun',
-      'potion_save', 'potion_poison', 'emblem_good', 'emblem_wolf', 'badge_sheriff', 'stamp_red', 'stamp_green', 'torn']
+    ['cardback', 'frame_dark', 'frame_bone', 'frame_red', 'frame_gold', 'frame_line_ink', 'frame_dash', 'token_dim', 'token_red',
+      'ring_red', 'ring_gold', 'cross', 'moon', 'potion_save', 'potion_poison', 'badge_sheriff', 'mark_done', 'mark_wait']
       .forEach(function (f) { new Image().src = 'art/' + f + '.svg'; });
     lastHtml = ''; lastSheet = '';
     paint();
@@ -1242,9 +1261,5 @@
     ui.code = saved.code;
     recheck();                                   // 刷新页面或手机杀掉浏览器后，自动回到原来的座位
   }
-  // 开场动画：每个标签页第一次打开首页时播一次，点标题可以重播
-  var seen = false;
-  try { seen = sessionStorage.getItem('lrs:intro') === '1'; sessionStorage.setItem('lrs:intro', '1'); } catch (e) { /* 无痕模式 */ }
-  if (!cred && !seen) playIntro();
   paint();
 })();

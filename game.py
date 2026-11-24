@@ -1329,7 +1329,7 @@ class Room(object):
     def _begin_settle(self, seats, then):
         d = self.g['day']
         d['stage'] = 'settle'
-        d['settle'] = {'then': then, 'pending': {}, 'words': []}
+        d['settle'] = {'then': then, 'pending': {}, 'words': [], 'done': []}
         for s in seats:
             self._add_settle(s)
         if d['settle']['pending']:
@@ -1364,6 +1364,7 @@ class Room(object):
                 raise GameError('你无法发动技能')
             self._need_alive_target(target)
         del d['settle']['pending'][seat]
+        d['settle']['done'].append(seat)
         if pend['badge']:
             if heir:
                 g['sheriff'] = heir
@@ -1718,7 +1719,8 @@ class Room(object):
             v['me'] = me
 
         if self.phase == 'deal':
-            v['deal'] = {'seen': seat in g['seen'], 'count': len(g['seen'])}
+            # ready：已经看完身份的座位，所有人都看得到（只是「看没看」，不涉及身份）
+            v['deal'] = {'seen': seat in g['seen'], 'count': len(g['seen']), 'ready': sorted(g['seen'])}
         elif self.phase == 'night':
             v['night'] = {'prompt': self._night_prompt(seat, st)}
         elif self.phase == 'day':
@@ -1929,7 +1931,7 @@ class Room(object):
         if d['settle']:
             pend = d['settle']['pending']
             mine = pend.get(seat)
-            out['settle'] = {'waiting': sorted(pend),
+            out['settle'] = {'waiting': sorted(pend), 'done': sorted(d['settle']['done']),
                              'mine': dict(mine) if mine else None,
                              'targets': self._alive()}
         if d['vote']:

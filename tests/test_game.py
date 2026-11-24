@@ -1388,6 +1388,25 @@ class HiddenInformation(unittest.TestCase):
 
 
 class Lobby(unittest.TestCase):
+    def test_everyone_can_see_who_has_looked_at_their_card(self):
+        t = Table(D9)
+        t.act(1, 'deal')
+        t.act(2, 'seen')
+        t.act(7, 'seen')
+        for s in (1, 2, 5):
+            self.assertEqual(t.view(s)['deal']['ready'], [2, 7])
+        self.assertEqual((t.view(2)['deal']['seen'], t.view(5)['deal']['seen']), (True, False))
+
+    def test_settle_shows_who_has_confirmed(self):
+        t = Table(D9)
+        t.deal()
+        t.night(kill=4, poison=6)
+        st = t.day()['settle']
+        self.assertEqual((st['waiting'], st['done']), ([4, 6], []))
+        t.act(4, 'settle', target=0)
+        st = t.day()['settle']
+        self.assertEqual((st['waiting'], st['done']), ([6], [4]))
+
     def test_deal_needs_everyone_seated(self):
         t = Table(D9)
         t.act(5, 'stand')
