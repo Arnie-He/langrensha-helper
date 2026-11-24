@@ -10,7 +10,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, '..', '..', 'public', 'art')
 os.makedirs(OUT, exist_ok=True)
 
-ALPHA = {'logo': 760, 'moon': 256, 'sun': 256}        # 名字: 最长边
+ALPHA = {'logo': 760, 'moon': 256, 'sun': 256,       # 名字: 最长边
+         'potion_save': 200, 'potion_poison': 200, 'emblem_good': 280, 'emblem_wolf': 280, 'badge_sheriff': 120}
 OPAQUE = {'cardback': 640, 'bg_dusk': 1350, 'bg_night': 1350, 'bg_day': 1350}
 
 for name, size in ALPHA.items():

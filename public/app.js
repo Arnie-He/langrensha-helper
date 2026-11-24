@@ -48,6 +48,13 @@
   function has(arr, x) { return (arr || []).indexOf(x) >= 0; }
   // 角色头像（public/avatars/<角色>.jpg，由 tools/avatar_gen 用 Codex 画出来）
   function avSrc(id) { return 'avatars/' + id + '.jpg'; }
+  // 界面小图（public/art，同样由 Codex 画）
+  function art(name, cls) { return '<img class="art-' + (cls || name) + '" src="art/' + name + '.webp" alt="" draggable="false">'; }
+  function roleIdByName(nm) {
+    var hit = '';
+    Object.keys(ROLE).forEach(function (id) { if (ROLE[id].name === nm) hit = id; });
+    return hit;
+  }
   function av(id, cls) {
     return id ? '<img class="av' + (cls ? ' ' + cls : '') + '" src="' + avSrc(id) + '" alt="" draggable="false">' : '';
   }
@@ -440,7 +447,7 @@
     var corner = s.seat === V.you.seat ? '我' : (s.host ? '房主' : '');
     var tag = o.tag || (s.shown ? role(s.shown).name : (!s.alive ? '出局' :
       (s.taken && !s.online ? '掉线' : (s.can_vote === false ? '无票' : ''))));
-    var inner = '<span class="tk">' + (s.sheriff ? '<i class="star">警</i>' : '') +
+    var inner = '<span class="tk">' + (s.sheriff ? '<i class="star" title="警长"></i>' : '') +
       (corner ? '<i class="corner">' + corner + '</i>' : '') + (s.shown ? av(s.shown) : '') + '<b>' + s.seat + '</b></span>' +
       '<span class="nm">' + name + '</span>' + (tag ? '<i class="tg">' + tag + '</i>' : '') + (o.extra || '');
     if (o.act && !o.dis) {
@@ -622,7 +629,9 @@
     }
 
     if (p.ui === 'result') {
-      main = '<div class="result ' + (p.tone || 'plain') + '"><div class="lbl">' + esc(p.title) + '</div><div class="big">' + esc(p.big) + '</div>' +
+      var rid = roleIdByName(p.big);
+      var pic = rid ? av(rid, 'res') : p.tone === 'bad' ? art('emblem_wolf', 'emblem') : p.tone === 'good' ? art('emblem_good', 'emblem') : '';
+      main = '<div class="result ' + (p.tone || 'plain') + '"><div class="lbl">' + esc(p.title) + '</div>' + pic + '<div class="big">' + esc(p.big) + '</div>' +
         (p.lines || []).map(function (l) { return '<p>' + esc(l) + '</p>'; }).join('') + '</div>';
       bar = btn(esc(p.ok), 'night-ok', 'pri');
     }
@@ -681,18 +690,18 @@
       } else {
         var a;
         if (!p.antidote) {
-          a = '<div class="card opt gone"><div class="txt"><div class="lbl">解药</div><div class="t">已经用掉了，所以不知道今晚谁倒牌</div></div></div>';
+          a = '<div class="card opt gone">' + art('potion_save', 'potion') + '<div class="txt"><div class="lbl">解药</div><div class="t">已经用掉了，所以不知道今晚谁倒牌</div></div></div>';
         } else if (!p.victim) {
-          a = '<div class="card opt gone"><div class="txt"><div class="lbl">解药</div><div class="t">今晚没有人倒牌</div></div></div>';
+          a = '<div class="card opt gone">' + art('potion_save', 'potion') + '<div class="txt"><div class="lbl">解药</div><div class="t">今晚没有人倒牌</div></div></div>';
         } else {
-          a = '<div class="card opt"><div class="txt"><div class="lbl">解药</div><div class="t">今晚倒牌的是 <em>' + p.victim + ' 号' +
+          a = '<div class="card opt">' + art('potion_save', 'potion') + '<div class="txt"><div class="lbl">解药</div><div class="t">今晚倒牌的是 <em>' + p.victim + ' 号' +
             (p.victim === me ? '（你自己）' : ' ' + esc(seatOf(p.victim).name)) + '</em></div>' +
             (p.can_save ? '' : '<div class="hint">按本局规则，你不能自救。</div>') + '</div>' +
-            (p.can_save ? btn('救', 'witch-save', 'sm pri') : '') + '</div>';
+            (p.can_save ? btn('救人', 'witch-save', 'sm pri') : '') + '</div>';
         }
         var b = p.poison
-          ? '<div class="card opt"><div class="txt"><div class="lbl">毒药</div><div class="t">还有一瓶</div></div>' + btn('下毒', 'witch-poison', 'sm red') + '</div>'
-          : '<div class="card opt gone"><div class="txt"><div class="lbl">毒药</div><div class="t">已经用掉了</div></div></div>';
+          ? '<div class="card opt">' + art('potion_poison', 'potion') + '<div class="txt"><div class="lbl">毒药</div><div class="t">还有一瓶</div></div>' + btn('下毒', 'witch-poison', 'sm red') + '</div>'
+          : '<div class="card opt gone">' + art('potion_poison', 'potion') + '<div class="txt"><div class="lbl">毒药</div><div class="t">已经用掉了</div></div></div>';
         main = ask('女巫，决定是否用药', '同一晚只能用一瓶。') + a + b;
         bar = btn('今晚不用药', 'witch-none');
       }
@@ -708,12 +717,14 @@
       var t = res.ballots[voter];
       if (t) (by[t] = by[t] || []).push(+voter); else abst.push(+voter);
     });
+    var most = Math.max.apply(null, [1].concat(Object.keys(by).map(function (t) { return res.counts[t]; })));
     var rows = Object.keys(by).map(Number).sort(function (a, b) { return res.counts[b] - res.counts[a] || a - b; })
       .map(function (t) {
         var who = by[t].sort(function (a, b) { return a - b; }).map(function (x) {
           return x + (res.sheriff && x === res.sheriff ? '（警长 1.5 票）' : '');
         }).join('、');
-        return '<div class="vr' + (has(res.top, t) ? ' top' : '') + '"><b>' + t + ' 号</b><span>' + res.counts[t] +
+        return '<div class="vr' + (has(res.top, t) ? ' top' : '') + '"><i class="vbar" style="width:' +
+          Math.round(res.counts[t] / most * 100) + '%"></i><b>' + t + ' 号</b><span>' + res.counts[t] +
           ' 票 ← ' + who + '</span></div>';
       }).join('');
     if (abst.length) rows += '<div class="vr"><b>弃票</b><span>' + abst.sort(function (a, b) { return a - b; }).join('、') + '</span></div>';
@@ -861,7 +872,7 @@
     var o = V.over, w = o.winner;
     var ttl = { good: '好人阵营获胜', wolf: '狼人阵营获胜', third: '情侣阵营获胜' }[w];
     var mine = V.me ? o.camps[V.you.seat] : null;
-    var main = '<div class="verdict ' + w + '"><h1>' + ttl + '</h1>' +
+    var main = '<div class="verdict ' + w + '">' + (w === 'wolf' ? art('emblem_wolf', 'emblem') : w === 'good' ? art('emblem_good', 'emblem') : '') + '<h1>' + ttl + '</h1>' +
       '<p>' + (V.me ? '你是' + role(V.me.role).name + '，' + (mine === w ? '赢了' : '输了') : '') + '</p></div>' +
       grid(function (s) {
         var c = o.causes[s.seat], love = has(o.lovers, s.seat);
@@ -888,7 +899,7 @@
       }
       (me.notes || []).forEach(function (t) { notes.push(esc(t)); });
       html = '<div class="pk ' + r.team + '"><div class="who">' + V.you.seat + ' 号 ' + esc(V.you.name) + '</div>' +
-        av(me.role, 'big') + '<div class="role">' + r.name + '</div><div class="team">' + (r.team === 'wolf' ? '狼人阵营' : '好人阵营') + '</div>' +
+        av(me.role, 'big') + '<div class="role">' + r.name + '</div><div class="team">' + art(r.team === 'wolf' ? 'emblem_wolf' : 'emblem_good', 'chip') + (r.team === 'wolf' ? '狼人阵营' : '好人阵营') + '</div>' +
         '<div class="desc">' + esc(r.desc) + '</div>' +
         (notes.length ? '<div class="notes">' + notes.join('<br>') + '</div>' : '') + '</div>';
     }
@@ -1203,7 +1214,8 @@
   fetch('/api/info').then(function (r) { return r.json(); }).then(function (j) {
     info = j;
     j.roles.forEach(function (r) { ROLE[r.id] = r; new Image().src = avSrc(r.id); });
-    ['cardback.jpg', 'bg_night.jpg', 'bg_day.jpg', 'moon.webp', 'sun.webp'].forEach(function (f) { new Image().src = 'art/' + f; });
+    ['cardback.jpg', 'bg_night.jpg', 'bg_day.jpg', 'moon.webp', 'sun.webp', 'potion_save.webp', 'potion_poison.webp',
+      'emblem_good.webp', 'emblem_wolf.webp', 'badge_sheriff.webp'].forEach(function (f) { new Image().src = 'art/' + f; });
     lastHtml = ''; lastSheet = '';
     paint();
   }).catch(function () { /* 稍后刷新页面即可 */ });
