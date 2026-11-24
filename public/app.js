@@ -289,6 +289,14 @@
     if (stale) act('ack', { id: Speaker.done }, true);
   }, 1500);
 
+  // 保活：免费的托管平台 15 分钟收不到新请求就让服务器休眠，一休眠所有房间都没了。
+  // 实时推送是服务器单向发过来的，不算「请求」，所以发言时间一长、没人点手机就可能中招。
+  // 只要有一台手机开着房间页面，每 4 分钟发一个很小的请求，服务器就不会睡。
+  var KEEPALIVE_MS = 4 * 60 * 1000;
+  setInterval(function () {
+    if (cred) fetch('/healthz', { cache: 'no-store' }).catch(function () { /* 断网时下次再试 */ });
+  }, KEEPALIVE_MS);
+
   // 屏幕常亮：夜里手机放在桌上不能自己锁屏
   var wake = null;
   function keepAwake() {
