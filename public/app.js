@@ -46,10 +46,9 @@
   function seatOf(n) { return V.seats[n - 1] || {}; }
   function role(id) { return ROLE[id] || { name: id || '', team: 'good', kind: 'god', desc: '' }; }
   function has(arr, x) { return (arr || []).indexOf(x) >= 0; }
-  // 角色头像（public/avatars/<角色>.jpg，由 tools/avatar_gen 用 Codex 画出来）
-  function avSrc(id) { return 'avatars/' + id + '.jpg'; }
-  // 界面小图（public/art，同样由 Codex 画）
-  function art(name, cls) { return '<img class="art-' + (cls || name) + '" src="art/' + name + '.webp" alt="" draggable="false">'; }
+  // 角色头像（public/avatars/<角色>.svg）和界面小图（public/art/*.svg）都是 tools/sketch 画出来的手绘线稿
+  function avSrc(id) { return 'avatars/' + id + '.svg'; }
+  function art(name, cls) { return '<img class="art-' + (cls || name) + '" src="art/' + name + '.svg" alt="" draggable="false">'; }
   function roleIdByName(nm) {
     var hit = '';
     Object.keys(ROLE).forEach(function (id) { if (ROLE[id].name === nm) hit = id; });
@@ -58,6 +57,8 @@
   function av(id, cls) {
     return id ? '<img class="av' + (cls ? ' ' + cls : '') + '" src="' + avSrc(id) + '" alt="" draggable="false">' : '';
   }
+  // 大头像：镶在一枚圆牌里
+  function medal(id) { return id ? '<span class="medal">' + av(id) + '</span>' : ''; }
 
   var toastT = null;
   function toast(msg) {
@@ -370,12 +371,15 @@
     if (sky !== lastSky) {
       lastSky = sky;
       document.body.setAttribute('data-sky', sky);
-      var tc = { dusk: '#1b1844', night: '#0b0a1d', day: '#8fcbff', blood: '#250b1b', dawn: '#ffb39c' }[sky];
+      var tc = { dusk: '#2a2019', night: '#0e0d0c', day: '#cdbd96', blood: '#2a0d0a', dawn: '#d3bf96' }[sky];
       var meta = document.querySelector('meta[name="theme-color"]');
       if (meta) meta.setAttribute('content', tc);
     }
+    document.body.classList.toggle('at-home', home);
     if (home && !ui.claim && !ui.intro) FX.dm.start(1, 30); else if (!ui.intro) FX.dm.stop();
-    FX.bgm.want(home || V.phase === 'lobby' || V.phase === 'over');
+    // 背景音乐只在首页、大厅、结束页放；这台手机正在播报语音时先让开，播完再接着放。
+    // 背景音乐的开关（FX.bgm.muted）和语音播报（Speaker）是两套互不相干的东西。
+    FX.bgm.want((home || V.phase === 'lobby' || V.phase === 'over') && !Speaker.text);
   }
 
   function frame(o) {
@@ -420,7 +424,8 @@
       var x = 50 + rx * Math.sin(a), y = 50 - ry * Math.cos(a);
       return '<div class="slot" style="left:' + x.toFixed(2) + '%;top:' + y.toFixed(2) + '%">' + fn(s) + '</div>';
     }).join('');
-    return '<div class="ring" style="--sz:' + sz + 'px"><div class="table">' + (center || tableDefault()) + '</div>' + slots + '</div>';
+    var minw = n <= 9 ? '250px' : n <= 12 ? '300px' : '100%';
+    return '<div class="ring" style="--sz:' + sz + 'px;--minw:' + minw + '"><div class="table">' + (center || tableDefault()) + '</div>' + slots + '</div>';
   }
   function tableDefault() {
     if (V.phase === 'night') return '<div class="moon"></div><div class="sm">第 ' + V.night_no + ' 夜</div>';
@@ -522,7 +527,7 @@
     }).join('') + '</div>';
     var hero = '<div class="hero">' +
       '<button class="snd' + (FX.bgm.muted ? ' off' : '') + '" data-act="snd" aria-label="背景音乐">' + SND + '</button>' +
-      fan + '<h1 class="title" data-act="replay"><img src="art/logo.webp" alt="狼人杀"></h1></div>';
+      fan + '<h1 class="title" data-act="replay"><span class="tt">狼人杀</span><i class="claw"></i><em>面杀助手</em></h1></div>';
     if (cred) return '<div class="screen home"><main class="main" data-k="home">' + hero + '<p class="hint center" style="margin-top:24px">正在进入房间…</p></main></div>';
     var name = '<label class="field"><span>你的昵称</span><input id="in-name" maxlength="8" placeholder="最多 8 个字" autocomplete="off" enterkeyhint="done"></label>';
     var code = '<label class="field"><span>房间号</span><input id="in-code" class="codein" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="····" autocomplete="off" enterkeyhint="done"></label>';
@@ -562,19 +567,18 @@
     var off = V.seats.filter(function (s) { return s.taken && !s.online; }).length;
     var others = V.standing - (me.seat ? 0 : 1);
     var main =
-      '<button class="card invite" data-act="qr"><img class="qr" src="' + qrSrc() + '" alt="进房二维码">' +
-      '<div><div class="lbl">房间号</div><div class="digits">' + V.code + '</div><div class="hint">扫码进房，点这里放大</div></div></button>' +
-      '<div class="card board"><div class="txt"><div class="lbl">' + n + ' 人局</div>' + lineup(V.config.roles) +
-      '<div class="hint">' + rulesText() + '</div>' + (V.err ? '<div class="warn-t">' + esc(V.err) + '</div>' : '') + '</div>' +
-      btn(me.host ? '改板子' : '看规则', me.host ? 'config' : 'menu', 'sm') + '</div>' +
-      '<div class="sec-t">按实际座位顺序坐下<span>' + taken + ' / ' + n + '</span></div>' +
+      '<div class="card lobbyhd"><button class="qrbtn" data-act="qr" aria-label="放大二维码"><img class="qr" src="' + qrSrc() + '" alt="进房二维码"></button>' +
+      '<button class="txt" data-act="qr"><div class="lbl">房间号 · 扫码进房</div><div class="digits">' + V.code + '</div></button>' +
+      btn(me.host ? '改板子' : '看规则', me.host ? 'config' : 'menu', 'sm') +
+      '<div class="brd">' + lineup(V.config.roles) + '<div class="hint">' + n + ' 人局，' + rulesText() + '</div>' +
+      (V.err ? '<div class="warn-t">' + esc(V.err) + '</div>' : '') + '</div></div>' +
       grid(function (s) {
         if (!s.taken) return tile(s, { act: 'sit' });
         if (s.seat === me.seat) return tile(s, { act: 'stand' });
         return tile(s, me.host ? { act: 'kick' } : {});
       }, '<div class="big">' + taken + '<small>/' + n + '</small></div><div class="sm">' +
         (taken < n ? (me.seat ? '等人入座' : '点空位坐下') : '人齐了') + '</div>') +
-      '<p class="hint center" style="margin-top:14px">座位号要和围坐的顺序一致：1 号旁边是 2 号，依次排下去。' +
+      '<p class="hint center">按实际围坐的顺序坐：1 号旁边是 2 号，依次排下去。' +
       (others ? '<br>还有 ' + others + ' 人进了房间没入座。' : '') + '</p>';
     var bar;
     if (me.host) {
@@ -630,7 +634,7 @@
 
     if (p.ui === 'result') {
       var rid = roleIdByName(p.big);
-      var pic = rid ? av(rid, 'res') : p.tone === 'bad' ? art('emblem_wolf', 'emblem') : p.tone === 'good' ? art('emblem_good', 'emblem') : '';
+      var pic = rid ? medal(rid) : p.tone === 'bad' ? art('emblem_wolf', 'emblem') : p.tone === 'good' ? art('emblem_good', 'emblem') : '';
       main = '<div class="result ' + (p.tone || 'plain') + '"><div class="lbl">' + esc(p.title) + '</div>' + pic + '<div class="big">' + esc(p.big) + '</div>' +
         (p.lines || []).map(function (l) { return '<p>' + esc(l) + '</p>'; }).join('') + '</div>';
       bar = btn(esc(p.ok), 'night-ok', 'pri');
@@ -757,7 +761,7 @@
     if (d.stage === 'e_signup') {
       var left1 = e.players.filter(function (s) { return !has(e.decided, s); });
       if (e.mine === 'signup') {
-        head = stage('警长竞选：你要上警吗？', '<p>大家同时选择，全部选完才会公布谁上警。上警的人不能投票。</p>');
+        head = stage('警长竞选：你要上警吗？', '<p>大家同时选择，全部选完才会公布谁上警。上警的人不参加第一轮投票。</p>');
         bar = row(btn('不上警', 'elect-run', '', false, ' data-v="0"'), btn('上警', 'elect-run', 'pri', false, ' data-v="1"'));
       } else {
         head = stage('警长竞选', '<p>已选择 ' + e.decided.length + ' / ' + e.players.length + '。' + (left1.length ? '还没选：' + nums(left1) + '。' : '') + '</p>');
@@ -769,13 +773,13 @@
       head = stage(pk ? '警长竞选平票 PK' : '竞选发言',
         '<p>' + (pk ? 'PK 玩家' : '上警玩家') + '：<b>' + nums(e.cands) + '</b></p>' +
         '<p>发言顺序：<b>' + seq(e.order) + '</b></p>' +
-        '<p>' + (pk ? '发言结束后，警下玩家再投一轮。' : '发言结束后进入退水环节。') + '狼人可以在右上角菜单里自爆。</p>');
+        '<p>' + (pk ? '发言结束后，警下和退水的玩家再投一轮。' : '发言结束后进入退水环节。') + '狼人可以在右上角菜单里自爆。</p>');
       bar = host ? btn(pk ? '发言结束，开始 PK 投票' : '发言结束，进入退水环节', 'elect-next', 'pri') : wait('等房主推进到下一步');
     }
     if (d.stage === 'e_withdraw') {
       var left2 = e.cands.filter(function (s) { return !has(e.decided, s); });
       if (e.mine === 'withdraw') {
-        head = stage('退水环节：你要退水吗？', '<p>退水就是退出竞选，退水以后也不能投票。大家同时选择。</p>');
+        head = stage('退水环节：你要退水吗？', '<p>退水就是退出竞选。退水后第一轮不能投票，平票 PK 时可以投。大家同时选择。</p>');
         bar = row(btn('退水', 'elect-wd', '', false, ' data-v="1"'), btn('留在警上', 'elect-wd', 'pri', false, ' data-v="0"'));
       } else {
         head = stage('退水环节', '<p>警上玩家正在决定是否退水。' + (left2.length ? '还没选：' + nums(left2) + '。' : '') + '狼人可以在右上角菜单里自爆。</p>');
@@ -790,8 +794,9 @@
         bar = row(btn('弃票', 'elect-vote-none'), btn(ui.picks.length ? '投给 ' + ui.picks[0] + ' 号' : '先选一名玩家', 'elect-vote-ok', 'pri', !ui.picks.length));
       } else {
         head = stage('警长投票中 ' + ev.voted.length + ' / ' + ev.voters.length,
-          '<p>候选人：<b>' + nums(ev.cands) + '</b>。只有警下玩家投票。' + (left3.length ? '还没投：' + nums(left3) + '。' : '') + '</p>');
-        bar = host ? btn('结束投票（没投的算弃票）', 'elect-close') : wait('等警下玩家投完');
+          '<p>候选人：<b>' + nums(ev.cands) + '</b>。' + (ev.round === 2 ? '警下和退水的玩家投票。' : '只有警下玩家投票。') +
+          (left3.length ? '还没投：' + nums(left3) + '。' : '') + '</p>');
+        bar = host ? btn('结束投票（没投的算弃票）', 'elect-close') : wait(ev.round === 2 ? '等大家投完' : '等警下玩家投完');
       }
     }
 
@@ -858,11 +863,14 @@
     var res = all.length ? votesHtml(all[all.length - 1]) : '';
     var feed = '<div class="card feed">' + d.feed.map(function (t) { return '<p>' + esc(t) + '</p>'; }).join('') + '</div>';
     var inElection = e && d.stage.indexOf('e_') === 0;
-    var main = head + grid(function (s) {
+    // 重要的东西不用往下滑：最新一条消息紧跟在标题下面；刚投完票时，票型排在座位前面
+    var latest = d.feed.length ? '<div class="latest">' + esc(d.feed[d.feed.length - 1]) + '</div>' : '';
+    var resFirst = !pick && res && has(['wait', 'settle', 'e_pk', 'pk', 'dusk'], d.stage);
+    var main = head + latest + (resFirst ? res : '') + grid(function (s) {
       var o = pick ? pick(s) : {};
       if (inElection && !o.tag) o.tag = has(e.cands, s.seat) ? '警上' : has(e.withdrawn, s.seat) ? '已退水' : '';
       return tile(s, o);
-    }) + (d.feed.length ? '<div class="sec-t">今天发生的事</div>' + feed : '') + res;
+    }) + (d.feed.length > 1 ? '<div class="sec-t">今天发生的事</div>' + feed : '') + (resFirst ? '' : res);
     return frame({ title: '第 ' + d.no + ' 天 · ' + (names[d.stage] || ''), main: main, bar: bar, peek: true, key: 'day' + d.stage });
   }
 
@@ -899,7 +907,7 @@
       }
       (me.notes || []).forEach(function (t) { notes.push(esc(t)); });
       html = '<div class="pk ' + r.team + '"><div class="who">' + V.you.seat + ' 号 ' + esc(V.you.name) + '</div>' +
-        av(me.role, 'big') + '<div class="role">' + r.name + '</div><div class="team">' + art(r.team === 'wolf' ? 'emblem_wolf' : 'emblem_good', 'chip') + (r.team === 'wolf' ? '狼人阵营' : '好人阵营') + '</div>' +
+        medal(me.role) + '<div class="role">' + r.name + '</div><div class="team">' + art(r.team === 'wolf' ? 'emblem_wolf' : 'emblem_good', 'chip') + (r.team === 'wolf' ? '狼人阵营' : '好人阵营') + '</div>' +
         '<div class="desc">' + esc(r.desc) + '</div>' +
         (notes.length ? '<div class="notes">' + notes.join('<br>') + '</div>' : '') + '</div>';
     }
@@ -925,7 +933,7 @@
       } else if (s.type === 'config') {
         body = configHtml();
       }
-      html = '<div class="mask" data-act="close"></div><div class="box"><div class="grab"></div>' + body + '</div>';
+      html = '<div class="mask" data-act="close"></div><div class="wrap"><i class="torn"></i><div class="box">' + body + '</div></div>';
     }
     if (html !== lastSheet) {
       var box = sheetEl.querySelector('.box'), top = box ? box.scrollTop : 0;
@@ -1065,7 +1073,7 @@
         var o = {};
         o[ds.k] = ds.k === 'sheriff' ? ds.v === 'true' : ds.v;
         return act('config', o);
-      case 'role-info': return note(role(ds.r).name, av(ds.r, 'info') + esc(role(ds.r).desc));
+      case 'role-info': return note(role(ds.r).name, medal(ds.r) + esc(role(ds.r).desc));
       case 'test': ui.sheet = null; paint(); return act('test');
       case 'deal': return act('deal');
 
@@ -1214,8 +1222,9 @@
   fetch('/api/info').then(function (r) { return r.json(); }).then(function (j) {
     info = j;
     j.roles.forEach(function (r) { ROLE[r.id] = r; new Image().src = avSrc(r.id); });
-    ['cardback.jpg', 'bg_night.jpg', 'bg_day.jpg', 'moon.webp', 'sun.webp', 'potion_save.webp', 'potion_poison.webp',
-      'emblem_good.webp', 'emblem_wolf.webp', 'badge_sheriff.webp'].forEach(function (f) { new Image().src = 'art/' + f; });
+    ['cardback', 'frame_dark', 'frame_red', 'frame_gold', 'token_dim', 'token_red', 'ring_red', 'ring_gold', 'cross', 'sun',
+      'potion_save', 'potion_poison', 'emblem_good', 'emblem_wolf', 'badge_sheriff', 'stamp_red', 'stamp_green', 'torn']
+      .forEach(function (f) { new Image().src = 'art/' + f + '.svg'; });
     lastHtml = ''; lastSheet = '';
     paint();
   }).catch(function () { /* 稍后刷新页面即可 */ });

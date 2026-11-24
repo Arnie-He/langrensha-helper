@@ -26,6 +26,7 @@ from game import GameError, PRESETS, ROLES, ROLE_ORDER, Room, clean_name, full_r
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, 'public')
 PORT = int(os.environ.get('PORT', '3210'))
+DEV = bool(os.environ.get('LRS_DEV'))      # 开发时设 LRS_DEV=1：图片不缓存，改完马上能看到
 ROOM_TTL = 6 * 3600          # 房间 6 小时没人动就清掉
 PING_EVERY = 8               # 每 8 秒给每台手机发一次心跳，用来发现掉线
 
@@ -33,7 +34,7 @@ TYPES = {
     '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
     '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
     '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp',
-    '.ico': 'image/x-icon',
+    '.ico': 'image/x-icon', '.woff2': 'font/woff2',
     '.m4a': 'audio/mp4', '.mp3': 'audio/mpeg', '.wav': 'audio/wav',
 }
 
@@ -107,11 +108,13 @@ class Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------- 输出
 
-    def send_bytes(self, status, body, ctype, cache='no-cache'):
+    def send_bytes(self, status, body, ctype, cache='no-cache', etag=None):
         self.send_response(status)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', cache)
+        if etag:
+            self.send_header('ETag', etag)
         self.end_headers()
         if self.command != 'HEAD':
             self.wfile.write(body)
@@ -154,10 +157,21 @@ class Handler(BaseHTTPRequestHandler):
         if not full.startswith(PUBLIC + os.sep) or not os.path.isfile(full):
             return self.send_bytes(404, b'not found', 'text/plain')
         ext = os.path.splitext(full)[1].lower()
+        st = os.stat(full)
+        etag = '"%x-%x"' % (int(st.st_mtime), st.st_size)
+        # 语音、字体不会变，缓存一天；图片缓存十分钟；页面和脚本每次都来问一下有没有变（没变只回 304）
+        cache = ('no-cache' if DEV else
+                 'public, max-age=86400' if ext in ('.m4a', '.mp3', '.wav', '.woff2') else
+                 'public, max-age=600' if ext in ('.svg', '.jpg', '.png', '.webp') else 'no-cache')
+        if self.headers.get('If-None-Match') == etag:
+            self.send_response(304)
+            self.send_header('ETag', etag)
+            self.send_header('Cache-Control', cache)
+            self.end_headers()
+            return
         with open(full, 'rb') as f:
             body = f.read()
-        cache = 'public, max-age=86400' if ext in ('.m4a', '.mp3', '.wav') else 'no-cache'
-        self.send_bytes(200, body, TYPES.get(ext, 'application/octet-stream'), cache)
+        self.send_bytes(200, body, TYPES.get(ext, 'application/octet-stream'), cache, etag)
 
     def events(self, q):
         room = rooms.get(q.get('code', ''))

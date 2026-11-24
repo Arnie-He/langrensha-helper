@@ -176,8 +176,12 @@ def total_of(roles):
     return sum(int(roles.get(r, 0) or 0) for r in ROLE_ORDER)
 
 
+DEFAULT_PRESET = 'p12a'          # 新建房间时默认的板子：12 人预女猎白
+
+
 def default_config():
-    return {'roles': full_roles(PRESETS[2]['roles']), 'witch_self_save': 'first',
+    roles = next(p['roles'] for p in PRESETS if p['id'] == DEFAULT_PRESET)
+    return {'roles': full_roles(roles), 'witch_self_save': 'first',
             'win': 'side', 'sheriff': True}
 
 

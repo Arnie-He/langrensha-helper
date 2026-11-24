@@ -1203,17 +1203,20 @@ class Room(object):
         d = self.g['day']
         e = d['elect']
         d['stage'] = 'e_vote'
-        # 只有警下的人投票；上过警的人（包括退水的）不投
-        e['vote'] = {'round': rnd, 'cands': list(cands), 'voters': list(e['voters']),
-                     'ballots': {}}
-        self.cue(['elect_vote'])
+        # 第一轮只有警下的人投票；平票 PK 那一轮，退水的人也可以投。
+        # 一直留在警上的人（包括没进 PK 的）两轮都不投。
+        voters = list(e['voters'])
+        if rnd == 2:
+            voters = sorted(set(voters) | set(e['withdrawn']))
+        e['vote'] = {'round': rnd, 'cands': list(cands), 'voters': voters, 'ballots': {}}
+        self.cue(['elect_vote' if rnd == 1 else 'elect_vote_pk'])
 
     def a_elect_vote(self, p, data):
         d = self._need_stage('e_vote')
         v = d['elect']['vote']
         seat = p['seat']
         if seat not in v['voters']:
-            raise GameError('只有警下的玩家可以投票')
+            raise GameError('这一轮你不能投票')
         if seat in v['ballots']:
             raise GameError('你已经投过票了')
         target = _int(data.get('target'))

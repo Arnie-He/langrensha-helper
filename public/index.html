@@ -4,23 +4,27 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="format-detection" content="telephone=no">
-<meta name="theme-color" content="#211d4a">
-<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#2a2019">
+<meta name="color-scheme" content="dark">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>狼人杀面杀助手</title>
+<link rel="preload" href="fonts/xiaowei-0.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="fonts/fonts.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body data-sky="dusk">
-<div id="sky" aria-hidden="true"><i class="s-dusk"></i><i class="s-night"></i><i class="s-day"></i><i class="s-blood"></i><i class="s-dawn"></i><b class="stars"></b><b class="orb"></b></div>
+<div id="sky" aria-hidden="true"><i class="s-dusk"></i><i class="s-night"></i><i class="s-day"></i><i class="s-blood"></i><i class="s-dawn"></i><b class="scene"></b><b class="vig"></b><b class="orb"></b><b class="orb sun"></b></div>
+<!-- 给大字加一点毛边，像蘸水笔写的 -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><filter id="rough" x="-6%" y="-12%" width="112%" height="124%"><feTurbulence type="fractalNoise" baseFrequency=".04" numOctaves="2" seed="4"/><feDisplacementMap in="SourceGraphic" scale="3.2" xChannelSelector="R" yChannelSelector="G"/></filter></svg>
 <div id="dm" aria-hidden="true"></div>
 <div id="app"></div>
 <div id="sheet" hidden></div>
 <div id="peek" hidden></div>
 <div id="intro" hidden></div>
 <div id="toast" hidden></div>
-<noscript><p style="padding:24px;color:#fff">需要开启 JavaScript 才能使用。</p></noscript>
+<noscript><p style="padding:24px;color:#ece2c6">需要开启 JavaScript 才能使用。</p></noscript>
 <script src="fx.js"></script>
 <script src="app.js"></script>
 </body>

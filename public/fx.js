@@ -78,7 +78,7 @@
     var fan = cards.map(function (c, i) {
       var mid = (cards.length - 1) / 2, k = i - mid;
       return '<div class="in-card" style="--k:' + k + ';--i:' + i + ';--r:' + ((i * 37) % 24 - 12) + 'deg">' +
-        '<div class="in-face ' + c.team + '"><img src="avatars/' + c.id + '.jpg" alt=""><b>' + c.name + '</b></div></div>';
+        '<div class="in-face ' + c.team + '"><img src="avatars/' + c.id + '.svg" alt=""><b>' + c.name + '</b></div></div>';
     }).join('');
     introEl.innerHTML =
       '<div class="in-sky"></div>' +
@@ -86,7 +86,7 @@
       '<div class="in-line l3">天黑请闭眼</div></div>' +
       '<div class="in-lid top"></div><div class="in-lid bot"></div>' +
       '<div class="in-cards">' + fan + '</div>' +
-      '<div class="in-title"><img src="art/logo.webp" alt="狼人杀"></div>' +
+      '<div class="in-title">狼人杀</div>' +
       '<button class="in-skip" type="button">跳过</button>';
     introEl.hidden = false;
     introEl.className = 'play';

@@ -1186,6 +1186,35 @@ class Sheriff(unittest.TestCase):
         t.flush()
         self.assertEqual(t.g['badge'], 'lost')               # 没有警下，没人能投票
 
+    def test_withdrawn_players_vote_in_the_pk_round(self):
+        t = self.start(kill=0)
+        for s in range(1, 10):
+            t.act(s, 'elect_run', run=s in (2, 4, 7, 9))
+        t.flush()
+        t.act(1, 'elect_next')
+        for s in (2, 4, 7, 9):
+            t.act(s, 'elect_withdraw', out=s == 9)
+        t.flush()
+        v = t.day()['elect']['vote']
+        self.assertEqual(v['voters'], [1, 3, 5, 6, 8])       # 第一轮：退水的 9 号不投
+        for s, to in ((1, 2), (3, 2), (5, 4), (6, 4), (8, 7)):
+            t.act(s, 'elect_vote', target=to)
+        t.flush()
+        self.assertEqual((t.stage(), t.day()['elect']['pk']), ('e_pk', [2, 4]))
+        t.heard = []
+        t.act(1, 'elect_next')
+        v = t.day()['elect']['vote']
+        self.assertEqual((v['round'], v['voters']), (2, [1, 3, 5, 6, 8, 9]))   # PK：警下 + 退水
+        self.assertEqual(t.day(9)['elect']['mine'], 'vote')
+        self.assertIsNone(t.day(7)['elect']['mine'])         # 留在警上没进 PK 的 7 号不投
+        with self.assertRaises(GameError):
+            t.act(7, 'elect_vote', target=2)
+        for s, to in ((1, 2), (3, 2), (5, 4), (6, 4), (8, 0), (9, 4)):
+            t.act(s, 'elect_vote', target=to)
+        t.flush()
+        self.assertIn('elect_vote_pk', t.heard)
+        self.assertEqual(t.g['sheriff'], 4)                  # 退水的 9 号那一票打破了平局
+
     def test_tie_pk_then_tie_again(self):
         t = self.start(kill=0)
         for s in range(1, 10):
