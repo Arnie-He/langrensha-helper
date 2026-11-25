@@ -35,6 +35,11 @@ FAKE_ACT = {'witch': (11.0, 17.0), 'wolf': (8.0, 14.0), 'cupid': (8.0, 13.0),
             'magician': (7.0, 12.0)}
 FAKE_DEFAULT = (6.0, 11.0)
 
+# 掉线判定（秒）。手机锁屏、切到别的 App、换网络时连接会断一下再连上，不能一断就当成掉线。
+OFFLINE_GRACE = 6.0          # 连接断开后，这么久还没连回来才算掉线
+ALIVE_FOR = 16.0             # 连接还在，但这么久没有回应心跳（页面被系统冻结了），也算掉线
+CUE_STALL = 25.0             # 一条语音排到队首这么久还没播完，就认为房主手机的播报卡住了
+
 # 只有这些死法可以发动猎人 / 狼王的枪
 GUN_OK = ('wolf', 'vote', 'shot', 'take', 'hunt')
 CAUSE_TEXT = {
@@ -94,6 +99,8 @@ class Room(object):
         self.g = None                 # 一局游戏的全部状态
         self.cues = []                # 等待房主手机播报的语音队列
         self.cue_seq = 0
+        self.cue_since = 0.0          # 队首那条语音是什么时候开始等的
+        self.stalled = False          # 播报卡住了（见 sweep），这时别人可以接手播报
         self.epoch = 0                # 每次回到大厅 +1，让旧的定时器失效
         self.touched = time.time()
 
@@ -116,6 +123,8 @@ class Room(object):
     def cue(self, clips, gate=None):
         """排一条语音。gate 是这条语音播完以后才执行的动作。"""
         self.cue_seq += 1
+        if not self.cues:
+            self.cue_since = time.time()
         self.cues.append({'id': self.cue_seq, 'clips': list(clips), 'gate': gate})
 
     def when_quiet(self, fn):
@@ -139,6 +148,8 @@ class Room(object):
                 return
             while self.cues and self.cues[0]['id'] <= cue_id:
                 c = self.cues.pop(0)
+                self.cue_since = time.time()
+                self.stalled = False
                 if c['gate']:
                     c['gate']()
             self.changed()
@@ -153,8 +164,11 @@ class Room(object):
         return {p['seat']: p for p in self.players.values() if p['seat']}
 
     def add_player(self, name):
+        # online 是别人看到的「在线 / 掉线」；conns 是这台手机现在有几条实时连接；
+        # seen 是最后一次有动静（连上来、回应心跳、轮询）的时间；hb 表示这台手机会回应心跳
         p = {'id': secrets.token_hex(4), 'token': secrets.token_hex(12),
-             'name': clean_name(name), 'seat': 0, 'online': 0}
+             'name': clean_name(name), 'seat': 0,
+             'online': False, 'conns': 0, 'seen': 0.0, 'left': 0.0, 'hb': False}
         self.players[p['id']] = p
         if self.host is None:
             self.host = p['id']
@@ -166,25 +180,70 @@ class Room(object):
             return p
         return None
 
-    def attach(self, pid):
+    def attach(self, pid, hb=False, now=None):
+        """这台手机连上来了一条实时连接。hb=True 表示它会定时回应心跳（见 touch）。"""
         with self.lock:
             p = self.players.get(pid)
             if p:
-                p['online'] += 1
+                p['conns'] += 1
+                p['hb'] = bool(hb)
+                p['seen'] = time.time() if now is None else now
+                p['online'] = True
                 self.touched = time.time()
                 self.changed()
 
-    def detach(self, pid):
+    def detach(self, pid, now=None):
+        """一条实时连接断了。先不算掉线：多半几秒内就会连回来，真没回来由 sweep 标记。"""
         with self.lock:
             p = self.players.get(pid)
             if not p:
                 return
-            p['online'] = max(0, p['online'] - 1)
-            # 大厅里没入座又掉线的人直接清掉，免得名单越来越长
-            if (self.phase == 'lobby' and not p['online'] and not p['seat']
-                    and pid != self.host):
-                del self.players[pid]
-            self.changed()
+            p['conns'] = max(0, p['conns'] - 1)
+            if not p['conns']:
+                p['left'] = time.time() if now is None else now
+
+    def touch(self, pid, now=None):
+        """这台手机刚刚有动静（回应了心跳，或者来取了一次画面）。"""
+        with self.lock:
+            p = self.players.get(pid)
+            if not p:
+                return False
+            p['seen'] = time.time() if now is None else now
+            if not p['online']:
+                p['online'] = True
+                self.changed()
+            return True
+
+    def sweep(self, now=None):
+        """定时检查（服务器每两秒调一次）：标记真正掉线的人，发现播报卡住。
+
+        掉线 = 连接断开超过 OFFLINE_GRACE 还没回来，或者连接还在但超过 ALIVE_FOR 没有回应心跳
+        （手机锁屏后页面被系统冻结，连接表面上还在，其实收不到任何东西）。
+        """
+        now = time.time() if now is None else now
+        with self.lock:
+            dirty = False
+            for pid, p in list(self.players.items()):
+                if not p['online']:
+                    continue
+                if p['conns']:
+                    gone = p['hb'] and now - p['seen'] > ALIVE_FOR
+                else:
+                    gone = now - max(p['seen'], p['left']) > OFFLINE_GRACE
+                if not gone:
+                    continue
+                p['online'] = False
+                dirty = True
+                # 大厅里没入座又掉线的人直接清掉，免得名单越来越长
+                if self.phase == 'lobby' and not p['seat'] and pid != self.host:
+                    del self.players[pid]
+            # 一句话里报的号码越多（比如报一长串上警的人），允许的时间越长
+            stalled = bool(self.cues) and now - self.cue_since > CUE_STALL + 1.5 * len(self.cues[0]['clips'])
+            if stalled != self.stalled:
+                self.stalled = stalled
+                dirty = True
+            if dirty:
+                self.changed()
 
     def offline_seats(self):
         """游戏进行中可以被重新认领的座位（原主人掉线了）。"""
@@ -301,10 +360,13 @@ class Room(object):
                 q['seat'] = 0
 
     def a_take_host(self, p, data):
+        """换一台手机来播报：只有房主掉线了，或者播报卡住了才可以。"""
         host = self.players.get(self.host)
-        if host and host['online']:
+        if host and host['online'] and not self.stalled:
             raise GameError('房主还在线')
         self.host = p['id']
+        self.stalled = False
+        self.cue_since = time.time()
 
     def a_test(self, p, data):
         self._need_host(p)
@@ -1396,6 +1458,17 @@ class Room(object):
             d['stage'] = 'wait'
             self.when_quiet(self._end_settle)
 
+    def a_settle_close(self, p, data):
+        """房主不等了：还没确认的出局玩家（人走了、手机没电了）一律按「不发动技能」处理，
+        其中的警长撕掉警徽。否则一个人不回来，整局就停在这里。"""
+        self._need_host(p)
+        d = self._need_stage('settle')
+        seated = self.seat_map()
+        for seat in sorted(d['settle']['pending']):
+            if self.g['day']['stage'] != 'settle' or not self.g['day']['settle']:
+                break
+            self.a_settle(seated[seat], {'target': 0, 'badge': 0})
+
     def _end_settle(self):
         g = self.g
         d = g['day']
@@ -1678,6 +1751,7 @@ class Room(object):
             'host_seat': host['seat'] if host else 0,
             'host_name': host['name'] if host else '',
             'host_online': bool(host and host['online']),
+            'stalled': self.stalled,
             'seats': [],
         }
         count = n if not g else len(g['seats'])

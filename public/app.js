@@ -88,7 +88,7 @@
   function act(type, data, quiet) {
     if (!cred) return Promise.resolve(false);
     return post('/api/act', { code: cred.code, pid: cred.pid, token: cred.token, type: type, data: data || {} })
-      .then(function () { return true; }, function (e) {
+      .then(function () { expectNews(); return true; }, function (e) {
         if (!quiet) toast(e.message);
         return false;
       });
@@ -106,26 +106,129 @@
     connect();
   }
 
-  var es = null, retryT = null;
+  // 服务器用一条长连接把画面推过来。手机上这条连接很容易「假活着」：锁屏、切到别的 App、换网络之后，
+  // 浏览器以为它还通着，其实什么都收不到，画面就停在旧的一页（比如已经轮到你了，还显示「天黑请闭眼」）。
+  // 所以：
+  //   - 服务器每 5 秒发一次心跳。超过 STALE_MS 什么都没听到，就认定这条连接坏了，自己重连；
+  //   - 听到心跳就回应一下（/api/beat），服务器据此知道这台手机的页面还醒着，否则把它标成掉线；
+  //   - 回到前台、网络恢复时马上检查一次，不等定时器；
+  //   - 连续两次连上去都什么也听不到（有的网络不让长连接通过），就改成每隔一会儿主动去取一次画面。
+  var PING_MS = 5000, STALE_MS = 12000, POLL_MS = 1500, RETRY_SSE_MS = 120000;
+  var es = null, retryT = null, pollT = null, polling = false;
+  var connAt = 0, heardAt = 0, dataAt = 0, beatAt = 0, deaf = 0, pollSince = 0, expectT = null;
+
+  function credQs() { return 'code=' + cred.code + '&pid=' + cred.pid + '&token=' + cred.token; }
+
+  function heard() {
+    heardAt = Date.now();
+    deaf = 0;
+    if (!live) { live = true; paint(); }
+    if (cred && heardAt - beatAt >= PING_MS - 1000) {
+      beatAt = heardAt;
+      post('/api/beat', { code: cred.code, pid: cred.pid, token: cred.token }).catch(function (e) {
+        if (e.status === 403) recheck();
+      });
+    }
+  }
+
   function connect() {
+    stopPoll();
     if (es) { es.close(); es = null; }
+    clearTimeout(retryT);
     if (!cred) return;
-    es = new EventSource('/api/events?code=' + cred.code + '&pid=' + cred.pid + '&token=' + cred.token);
-    es.onopen = function () { live = true; paint(); };
+    connAt = Date.now();
+    if (!window.EventSource) return startPoll();           // 很老的浏览器没有长连接
+    es = new EventSource('/api/events?hb=1&' + credQs());
     es.onmessage = function (e) {
-      live = true;
       V = JSON.parse(e.data);
+      dataAt = Date.now();
+      heard();
       onView();
     };
+    es.addEventListener('ping', heard);
     es.onerror = function () {
-      live = false;
-      paint();
+      if (live) { live = false; paint(); }
       if (es && es.readyState === 2) {           // 服务器明确拒绝了：检查身份是否还有效
         es = null;
         clearTimeout(retryT);
         retryT = setTimeout(recheck, 1200);
       }
     };
+  }
+
+  // 刚做完一个操作（点了按钮、播完一句话），服务器应该马上推来新画面。两三秒还没等到，就主动去取一次；
+  // 取回来的和手上的不一样，说明推送漏了——这条连接已经不可信，换一条新的。
+  // 这样即使连接「假活着」，也只会愣两三秒，而不是一直停在旧画面上。
+  function expectNews() {
+    if (expectT) return;                         // 已经在等了（补发回报时会反复走到这里，不能每次都重新计时）
+    var at = Date.now();
+    expectT = setTimeout(function () {
+      expectT = null;
+      if (!cred || polling || dataAt >= at) return;
+      var mine = cred;
+      fetch('/api/view?' + credQs(), { cache: 'no-store' }).then(function (r) {
+        return r.ok ? r.json() : null;
+      }).then(function (j) {
+        if (!j || cred !== mine || polling || dataAt >= at) return;
+        if (JSON.stringify(j) === JSON.stringify(V)) return;
+        V = j;
+        onView();
+        connect();
+      }).catch(function () { /* 断网的情况由下面的定时检查处理 */ });
+    }, 2500);
+  }
+
+  // 每秒看一眼：连接是不是已经哑了
+  function checkConn() {
+    if (!cred) return;
+    var now = Date.now();
+    if (polling) {
+      if (now - pollSince > RETRY_SSE_MS) { deaf = 1; connect(); }     // 隔一阵再试试长连接
+      return;
+    }
+    if (!es) return;                             // 正在重新确认身份（recheck）
+    if (now - Math.max(heardAt, connAt) < STALE_MS) return;
+    if (heardAt < connAt) deaf++;                // 这条连接从头到尾什么都没听到
+    if (live) { live = false; paint(); }
+    if (deaf >= 2) startPoll(); else connect();
+  }
+  setInterval(checkConn, 1000);
+
+  // 回到前台 / 网络恢复：连接只要有一点可疑就立刻重连，不等上面的定时检查
+  function wakeUp() {
+    keepAwake();
+    Speaker.nudge();
+    if (!cred) return;
+    if (polling) return pollNow();
+    if (!es || es.readyState !== 1 || Date.now() - Math.max(heardAt, connAt) > PING_MS + 2500) connect();
+  }
+
+  function startPoll() {
+    if (es) { es.close(); es = null; }
+    polling = true;
+    pollSince = Date.now();
+    pollNow();
+  }
+  function stopPoll() { polling = false; clearTimeout(pollT); }
+  function pollNow() {
+    clearTimeout(pollT);
+    if (!polling || !cred) return;
+    var mine = cred;
+    fetch('/api/view?' + credQs(), { cache: 'no-store' }).then(function (r) {
+      if (r.status === 404) { stopPoll(); recheck(); return null; }
+      if (!r.ok) throw new Error('bad');
+      return r.json();
+    }).then(function (j) {
+      if (!j || !polling || cred !== mine) return;
+      live = true;
+      V = j;
+      onView();
+      pollT = setTimeout(pollNow, POLL_MS);
+    }).catch(function () {
+      if (!polling || cred !== mine) return;
+      if (live) { live = false; paint(); }
+      pollT = setTimeout(pollNow, 2500);
+    });
   }
 
   function recheck() {
@@ -140,6 +243,8 @@
 
   function leave() {
     if (es) { es.close(); es = null; }
+    stopPoll();
+    Speaker.rest();
     clearTimeout(retryT);
     cred = null; V = null; live = false;
     ui.sheet = null; ui.claim = null; ui.picks = []; ui.mode = null;
@@ -183,6 +288,7 @@
 
   var Speaker = {
     el: null, unlocked: false, busy: false, done: 0, text: '', urls: {}, dur: {}, loading: false,
+    idling: false, silence: '',
 
     init: function () {
       this.el = new Audio();
@@ -195,6 +301,7 @@
       var self = this;
       if (self.unlocked || self.busy) return;
       try {
+        self.el.loop = false;
         self.el.src = silentWav();
         var p = self.el.play();
         var ok = function () { self.unlocked = true; self.pump(); paint(); };
@@ -208,24 +315,69 @@
       self.loading = true;
       fetch('audio/manifest.json').then(function (r) { return r.json(); }).then(function (m) {
         self.dur = m;
-        Object.keys(m).forEach(function (id) {
-          fetch('audio/' + id + '.m4a').then(function (r) { return r.blob(); }).then(function (b) {
+        // 一次只下几个：一百多个文件同时下，网络差一点的手机会有一批失败
+        var ids = Object.keys(m), i = 0;
+        function next() {
+          if (i >= ids.length) return;
+          var id = ids[i++];
+          fetch('audio/' + id + '.m4a').then(function (r) {
+            if (!r.ok) throw new Error('bad');
+            return r.blob();
+          }).then(function (b) {
             self.urls[id] = URL.createObjectURL(b);
-          }).catch(function () { /* 用到时再直接从网络播 */ });
-        });
+          }).catch(function () { /* 用到时再直接从网络播 */ }).then(next);
+        }
+        for (var k = 0; k < 6; k++) next();
       }).catch(function () { self.loading = false; });
+    },
+
+    // 没有话要播的时候循环播一段静音。音频一直不断，手机锁屏或切到别的 App 以后，
+    // 系统才不会把这个页面冻住；否则两句播报之间一有空档，页面就被暂停，后面的话就播不出来了。
+    idle: function () {
+      var self = this;
+      if (!self.unlocked || self.busy || self.idling) return;
+      self.idling = true;
+      try {
+        self.el.loop = true;
+        self.el.src = self.silence || (self.silence = silentWav(40000));
+        var p = self.el.play();
+        if (p && p.catch) p.catch(function () { /* 下次点击时 nudge 会再试 */ });
+      } catch (e) { /* 不影响播报 */ }
+    },
+
+    rest: function () {
+      if (!this.idling) return;
+      this.idling = false;
+      try { this.el.loop = false; this.el.pause(); } catch (e) { /* ok */ }
+    },
+
+    // 用户点了一下屏幕，或者页面回到前台：如果声音被系统暂停了（来电、别的 App 抢了声音），趁机恢复
+    nudge: function () {
+      var el = this.el;
+      if (!el || !(this.busy || this.idling) || !el.paused) return;
+      try {
+        var p = el.play();
+        if (p && p.catch) p.catch(function () { /* 还不行就等下一次 */ });
+      } catch (e) { /* ok */ }
     },
 
     pump: function () {
       var self = this;
-      if (self.busy || !V || !V.you.host) return;
+      if (self.busy || !V) return;
+      if (!V.you.host) {                         // 播报交给别的手机了
+        self.rest();
+        if (self.text) { self.text = ''; paint(); }
+        return;
+      }
       var cue = null;
       (V.cues || []).forEach(function (c) { if (!cue && c.id > self.done) cue = c; });
       if (!cue) {
         if (self.text) { self.text = ''; paint(); }
+        self.idle();
         return;
       }
       if (!self.unlocked) { paint(); return; }   // 等房主点一下屏幕
+      self.idling = false;
       self.busy = true;
       self.text = cue.text;
       paint();
@@ -246,33 +398,63 @@
       });
     },
 
+    // 播一个片段。尽量保证真的播完了才算数：
+    //   - 加载失败：换成直接从网络取，再试两次，实在不行才跳过；
+    //   - 播到一半被系统暂停（来电、通知、别的 App 抢了声音）：自己接着播；
+    //   - 浏览器不许出声（需要用户再点一下）：回报 blocked，等房主点屏幕后整句重播。
     playOne: function (id, cb) {
-      var self = this, el = self.el, fin = false;
-      var watchdog = setTimeout(function () { end(false); }, ((self.dur[id] || 4) + 4) * 1000);
+      var self = this, el = self.el, fin = false, tries = 0, lastT = -1, still = 0, t0 = Date.now(), again = false;
+      var limit = ((self.dur[id] || 4) * 2 + 25) * 1000;
       function end(blocked) {
         if (fin) return;
         fin = true;
-        clearTimeout(watchdog);
+        clearInterval(tick);
         el.onended = el.onerror = null;
         cb(blocked);
       }
+      function go() {
+        try {
+          var p = el.play();
+          if (p && p.catch) {
+            p.catch(function (e) {
+              if (!fin && e && e.name === 'NotAllowedError') end(true);     // 还没被允许出声
+              // 其它情况（加载失败、被打断）由 onerror 和下面的定时检查处理
+            });
+          }
+        } catch (e) { end(true); }
+      }
+      function load() {
+        tries++;
+        lastT = -1;
+        still = 0;
+        el.loop = false;
+        // 第一次用预先下好的；失败了改成直接从网络取（加个参数绕开可能坏掉的缓存）
+        el.src = (tries === 1 && self.urls[id]) || ('audio/' + id + '.m4a' + (tries > 2 ? '?r=' + tries : ''));
+        go();
+      }
+      function fail() {
+        if (fin || again) return;
+        if (tries >= 3) return end(false);
+        again = true;
+        setTimeout(function () { again = false; if (!fin) load(); }, 400);
+      }
       el.onended = function () { end(false); };
-      el.onerror = function () { setTimeout(function () { end(false); }, 900); };
-      el.src = self.urls[id] || ('audio/' + id + '.m4a');
-      try {
-        var p = el.play();
-        if (p && p.catch) {
-          p.catch(function (e) {
-            if (e && e.name === 'NotAllowedError') end(true);     // 还没被允许出声
-            else setTimeout(function () { end(false); }, 900);
-          });
-        }
-      } catch (e) { end(true); }
+      el.onerror = fail;
+      var tick = setInterval(function () {
+        if (fin) return;
+        if (el.ended || Date.now() - t0 > limit) return end(false);
+        if (el.currentTime !== lastT) { lastT = el.currentTime; still = 0; return; }
+        still++;
+        if (still % 4 === 0 && el.paused) go();          // 两秒没动而且是暂停状态：接着播
+        if (still >= 16) fail();                         // 八秒都没动：重新加载
+      }, 500);
+      load();
     }
   };
 
-  function silentWav() {
-    var n = 800, buf = new ArrayBuffer(44 + n), v = new DataView(buf);
+  function silentWav(n) {
+    n = n || 800;
+    var buf = new ArrayBuffer(44 + n), v = new DataView(buf);
     function str(o, s) { for (var i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); }
     str(0, 'RIFF'); v.setUint32(4, 36 + n, true); str(8, 'WAVEfmt ');
     v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
@@ -298,14 +480,19 @@
   }, KEEPALIVE_MS);
 
   // 屏幕常亮：夜里手机放在桌上不能自己锁屏
-  var wake = null;
+  var wake = null, wakeBusy = false;
   function keepAwake() {
     try {
-      if (navigator.wakeLock && document.visibilityState === 'visible' && (!wake || wake.released)) {
-        navigator.wakeLock.request('screen').then(function (w) { wake = w; }, function () { /* 不支持就算了 */ });
-      }
-    } catch (e) { /* 不支持就算了 */ }
+      if (!navigator.wakeLock || document.visibilityState !== 'visible' || wakeBusy || (wake && !wake.released)) return;
+      wakeBusy = true;
+      navigator.wakeLock.request('screen').then(function (w) {
+        wakeBusy = false;
+        wake = w;
+        w.addEventListener('release', function () { setTimeout(keepAwake, 500); });   // 被系统收回了就再要一次
+      }, function () { wakeBusy = false; /* 不支持或暂时不给，稍后再试 */ });
+    } catch (e) { wakeBusy = false; }
   }
+  setInterval(function () { if (cred) { keepAwake(); Speaker.nudge(); } }, 15000);
 
   // ------------------------------------------------------------ 收到新画面
 
@@ -350,21 +537,55 @@
     else if (V.phase === 'day') html = dayScreen();
     else html = overScreen();
     if (html !== lastHtml) {
-      var m = app.querySelector('.main'), top = m ? m.scrollTop : 0;
+      var m = app.querySelector('.main');
       var keep = m ? m.getAttribute('data-k') : null;
-      var focus = document.activeElement && document.activeElement.id;
-      app.innerHTML = html;
+      var tpl = document.createElement('div');
+      tpl.innerHTML = html;
+      morph(app, tpl);
       lastHtml = html;
       var m2 = app.querySelector('.main');
-      if (m2 && m2.getAttribute('data-k') === keep) m2.scrollTop = top;
+      if (m2 && m2.getAttribute('data-k') !== keep) m2.scrollTop = 0;
       var a = document.getElementById('in-name'), b = document.getElementById('in-code');
-      if (a) a.value = ui.name;
-      if (b) b.value = ui.code;
-      if (focus && document.getElementById(focus)) document.getElementById(focus).focus();
+      if (a && a.value !== ui.name) a.value = ui.name;
+      if (b && b.value !== ui.code) b.value = ui.code;
     }
     paintSheet();
     paintPeek();
     paintSky();
+  }
+
+  // 把 a 里面的内容改成和 b 一样，但尽量在原来的节点上改，而不是整块换掉。
+  // 画面经常因为别人的状态变化而重画（有人掉线、有人投了票、语音开始 / 结束）。如果每次都整块换掉，
+  // 手指按下去和抬起来之间按钮刚好被换成了新的，这一下点击就丢了，看起来就是「点了没反应」。
+  function morph(a, b) {
+    var olds = [].slice.call(a.childNodes), news = [].slice.call(b.childNodes), i, o, n;
+    for (i = 0; i < news.length; i++) {
+      o = olds[i];
+      n = news[i];
+      if (!o) {
+        a.appendChild(n);
+      } else if (o.nodeType !== n.nodeType || o.nodeName !== n.nodeName ||
+          (o.nodeName === 'IMG' && o.getAttribute('src') !== n.getAttribute('src'))) {
+        a.replaceChild(n, o);
+      } else if (o.nodeType === 1) {
+        sameAttrs(o, n);
+        morph(o, n);
+      } else if (o.nodeValue !== n.nodeValue) {
+        o.nodeValue = n.nodeValue;
+      }
+    }
+    for (; i < olds.length; i++) a.removeChild(olds[i]);
+  }
+  function sameAttrs(o, n) {
+    var i, at;
+    for (i = o.attributes.length - 1; i >= 0; i--) {
+      at = o.attributes[i].name;
+      if (!n.hasAttribute(at)) o.removeAttribute(at);
+    }
+    for (i = 0; i < n.attributes.length; i++) {
+      at = n.attributes[i];
+      if (o.getAttribute(at.name) !== at.value) o.setAttribute(at.name, at.value);
+    }
   }
 
   // 天空跟着阶段走：首页 / 大厅 / 发牌是黄昏，夜里压暗，白天亮起来，结束看谁赢
@@ -397,16 +618,24 @@
     if (!V.host_online && !V.you.host) {
       banners += '<div class="banner warn act"><span>房主' + (V.host_seat ? '（' + V.host_seat + '号）' : '') +
         '掉线了，播报暂停</span><button class="btn sm" data-act="take-host">用我的手机播报</button></div>';
+    } else if (V.stalled && !V.you.host) {
+      // 房主的手机还连着，但一句话很久都没播完（声音被系统停掉了、手机卡住了）
+      banners += '<div class="banner warn act"><span>播报停了</span>' +
+        '<button class="btn sm" data-act="take-host">用我的手机播报</button></div>';
+    } else if (V.stalled && V.you.host && Speaker.unlocked) {
+      banners += '<div class="banner act" data-act="unlock"><span>播报停了，点一下这里继续</span></div>';
     }
+    // 横幅区和「播报中」这一行始终都在（没内容时是空的 / 隐藏的），这样它们出现、消失时
+    // 下面的按钮还是原来那些节点，不会因为画面重排而丢掉一次点击
     var bar = '';
-    if (V.you.host && Speaker.text) bar += '<div class="say">播报中…</div>';
+    if (V.you.host) bar += '<div class="say"' + (Speaker.text ? '' : ' hidden') + '>播报中…</div>';
     if (o.peek && V.me) bar += '<div class="peekrow"><button class="peekbtn" data-hold="1">按住看身份</button></div>';
     bar += o.bar || '';
     return '<div class="screen ' + (o.cls || '') + '">' +
       '<header class="top"><button class="code" data-act="qr" aria-label="房间号">' + V.code + '</button>' +
       '<div class="ttl">' + (o.title || '') + '</div>' +
       '<button class="more" data-act="menu" aria-label="菜单"><i></i><i></i><i></i></button></header>' +
-      banners +
+      '<div class="banners">' + banners + '</div>' +
       '<main class="main" data-k="' + (o.key || V.phase) + '">' + o.main + '</main>' +
       (bar ? '<footer class="bar">' + bar + '</footer>' : '') + '</div>';
   }
@@ -846,6 +1075,7 @@
         bar = btn('确认', 'settle-ok', 'pri');
       } else {
         head = stage('等出局玩家确认');
+        if (host) bar = btn('不等了', 'settle-close');
       }
     }
 
@@ -1147,6 +1377,8 @@
 
       // 出局确认
       case 'settle-ok': return settle(0);
+      case 'settle-close':
+        return confirm({ title: '不等了？', text: '还没确认的人按不发动技能处理，警长的警徽会被撕掉。', ok: '继续', run: function () { act('settle_close'); } });
       case 'shot-ok':
         return t && confirm({ title: '带走 ' + t + ' 号？', ok: '开枪', danger: true, run: function () {
           if (d.settle.mine.badge) { ui.shot = t; ui.picks = []; paint(); } else settle(t);
@@ -1192,6 +1424,7 @@
 
   document.addEventListener('click', function (e) {
     Speaker.unlock();
+    Speaker.nudge();
     FX.bgm.unlock();
     keepAwake();
     var el = e.target.closest ? e.target.closest('[data-act]') : null;
@@ -1230,9 +1463,13 @@
 
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState !== 'visible') return unpeek();
-    keepAwake();
-    if (cred && (!es || es.readyState !== 1)) connect();    // 手机从后台回来，立刻重连
+    wakeUp();                                    // 手机从后台回来：连接有一点可疑就立刻重连
   });
+  window.addEventListener('pageshow', wakeUp);
+  window.addEventListener('online', function () {   // 换了网络（Wi-Fi 和流量之间切换）：旧连接多半已经废了，直接换新的
+    if (cred && !polling) connect(); else wakeUp();
+  });
+  window.addEventListener('focus', wakeUp);
 
   // 微信安卓版会按系统字号放大网页，这里固定回标准大小
   function fixWeixinFont() {

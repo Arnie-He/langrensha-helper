@@ -145,6 +145,7 @@ img { -webkit-user-drag: none; }
 .top .more:active, .top .code:active { opacity: .6; }
 .lobby .top .code { visibility: hidden; }     /* 大厅的卡片里已经有房间号了 */
 
+.banners { flex: none; }
 .banner {
   flex: none; margin: 0 14px 8px; padding: 2px 8px; font: 15px/1.4 var(--hand); letter-spacing: .5px;
   border: 10px solid transparent; border-image: url(art/frame_red.svg) 34 fill / 10px stretch; color: var(--bone);

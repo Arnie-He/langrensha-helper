@@ -3,6 +3,7 @@
 import os
 import random
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -90,6 +91,12 @@ class Table(object):
 
     def view(self, seat):
         return self.room.view(self.pid[seat])
+
+    def drop(self, seat, after=60):
+        """这个座位的手机断线，而且过了很久都没连回来。"""
+        now = time.time()
+        self.room.detach(self.pid[seat], now=now)
+        self.room.sweep(now=now + after)
 
     @property
     def g(self):
@@ -1449,7 +1456,7 @@ class Lobby(unittest.TestCase):
         t.deal()
         with self.assertRaises(GameError):
             t.room.claim(5, '新手机')                        # 还在线，不能抢
-        t.room.detach(t.pid[5])
+        t.drop(5)
         self.assertEqual([x['seat'] for x in t.room.offline_seats()], [5])
         old_token = t.room.players[t.pid[5]]['token']
         p = t.room.claim(5, '新手机')
@@ -1460,22 +1467,207 @@ class Lobby(unittest.TestCase):
         t = Table(D9)
         with self.assertRaises(GameError):
             t.act(2, 'take_host')
-        t.room.detach(t.host)
+        t.drop(1)
         t.act(2, 'take_host')
         self.assertTrue(t.view(2)['you']['host'])
+
+
+class Connections(unittest.TestCase):
+    """掉线判定：手机锁屏、切后台、换网络都会让连接断一下，不能因此打断游戏。"""
+
+    def online(self, t, seat, viewer=2):
+        return t.view(viewer)['seats'][seat - 1]['online']
+
+    def test_a_quick_reconnect_never_shows_as_offline(self):
+        t = Table(D9)
+        now = time.time()
+        t.room.detach(t.pid[5], now=now)
+        t.room.sweep(now=now + game.OFFLINE_GRACE - 1)
+        self.assertTrue(self.online(t, 5))               # 还在宽限期里
+        t.room.attach(t.pid[5], now=now + 3)
+        t.room.sweep(now=now + 600)
+        self.assertTrue(self.online(t, 5))               # 连回来了，之后一直在线
+
+    def test_offline_only_after_the_grace_period(self):
+        t = Table(D9)
+        now = time.time()
+        t.room.detach(t.pid[5], now=now)
+        t.room.sweep(now=now + game.OFFLINE_GRACE + 1)
+        self.assertFalse(self.online(t, 5))
+        t.room.attach(t.pid[5], now=now + 30)
+        self.assertTrue(self.online(t, 5))
+
+    def test_a_flapping_player_does_not_block_dealing_but_a_gone_one_does(self):
+        t = Table(D9)
+        now = time.time()
+        t.room.detach(t.pid[5], now=now)
+        t.room.sweep(now=now + 2)
+        t.room.attach(t.pid[5], now=now + 3)
+        t.room.detach(t.pid[6], now=now)
+        t.room.sweep(now=now + 60)
+        with self.assertRaises(GameError):
+            t.act(1, 'deal')                             # 6 号真的走了
+        t.room.attach(t.pid[6], now=now + 61)
+        t.act(1, 'deal')
+
+    def test_a_frozen_phone_goes_offline_when_it_stops_answering_heartbeats(self):
+        t = Table(D9)
+        now = time.time()
+        t.room.attach(t.pid[5], hb=True, now=now)        # 新版页面：会回应心跳
+        t.room.sweep(now=now + game.ALIVE_FOR - 1)
+        self.assertTrue(self.online(t, 5))
+        t.room.sweep(now=now + game.ALIVE_FOR + 1)
+        self.assertFalse(self.online(t, 5))              # 连接还在，但页面已经不动了
+        t.room.touch(t.pid[5], now=now + 40)             # 手机醒过来，回应了一次
+        self.assertTrue(self.online(t, 5))
+        t.room.sweep(now=now + 600)                      # 4 号的页面不回应心跳（老版本 / 脚本），只看连接
+        self.assertTrue(self.online(t, 4))
+
+    def test_a_phone_that_can_only_poll_stays_online_while_it_polls(self):
+        t = Table(D9)
+        now = time.time()
+        t.room.detach(t.pid[5], now=now)                 # 长连接不通，改成轮询
+        for i in range(1, 30):
+            t.room.touch(t.pid[5], now=now + i * 1.5)
+            t.room.sweep(now=now + i * 1.5)
+            self.assertTrue(self.online(t, 5))
+        t.room.sweep(now=now + 45 + game.OFFLINE_GRACE + 1)
+        self.assertFalse(self.online(t, 5))              # 不来取了才算掉线
+
+    def test_unseated_people_who_leave_the_lobby_are_forgotten(self):
+        t = Table(D9)
+        p = t.room.add_player('路人')
+        now = time.time()
+        t.room.attach(p['id'], now=now)
+        t.room.detach(p['id'], now=now + 1)
+        t.room.sweep(now=now + 2)
+        self.assertIn(p['id'], t.room.players)           # 可能只是刷新了一下页面
+        t.room.sweep(now=now + 60)
+        self.assertNotIn(p['id'], t.room.players)
+
+    def test_someone_who_was_offline_can_come_back_and_act(self):
+        t = Table(D12)
+        t.deal()
+        t.drop(12)                                       # 守卫锁屏了
+        t.act(1, 'start_night')
+        t.flush()
+        self.assertEqual(t.types(), {12: 'guard'})       # 轮到他了，他不在
+        self.assertFalse(self.online(t, 12))
+        t.room.attach(t.pid[12])                         # 拿起手机，页面连回来
+        self.assertEqual(t.view(12)['night']['prompt']['type'], 'guard')
+        t.act(12, 'night', targets=[5])
+        t.flush()
+        self.assertNotIn(12, t.types())                  # 守卫环节过去了，游戏继续
+
+    def test_host_can_be_the_guard(self):
+        """房主自己抽到守卫：「守卫请睁眼」播完，房主手机上就要出现守卫的操作界面。"""
+        deck = ['guard'] + ['wolf'] * 3 + ['wolfking', 'mech', 'psychic', 'witch', 'hunter', 'knight'] + ['villager'] * 5
+        t = Table(deck)
+        t.deal()
+        t.act(1, 'start_night')
+        for _ in range(50):
+            cues = t.view(1).get('cues') or []
+            if cues and cues[0]['clips'] == ['guard_open']:
+                break
+            self.assertTrue(t.ack_one() or t.clock.run_next())
+        self.assertIsNone(t.view(1)['night']['prompt'])  # 还在播「守卫请睁眼」，界面先不出来
+        t.ack_one()                                      # 播完了
+        pr = t.view(1)['night']['prompt']
+        self.assertEqual((pr['type'], pr['ui']), ('guard', 'pick'))
+        self.assertEqual(pr['targets'], list(range(1, 16)))
+        t.act(1, 'night', targets=[1])                   # 守自己
+        t.flush()
+        self.assertEqual(t.g['night']['guard'], 1)
+
+    def test_host_can_stop_waiting_for_a_dead_player_who_left(self):
+        t = Table(D9)                                    # 9 号是猎人
+        t.deal()
+        t.night(kill=4)
+        t.confirm_dead()
+        t.act(1, 'start_vote')
+        for s in t.day()['vote']['voters']:
+            t.act(s, 'vote', target=9)
+        t.flush()
+        self.assertEqual(t.day()['settle']['waiting'], [9])       # 猎人被放逐，等他决定开不开枪
+        t.drop(9)                                        # 他把手机一扔走了
+        with self.assertRaises(GameError):
+            t.act(2, 'settle_close')                     # 只有房主能不等
+        t.act(1, 'settle_close')
+        t.flush()
+        self.assertEqual(t.stage(), 'dusk')              # 按不开枪处理，游戏继续
+        self.assertEqual(len(t.alive()), 7)
+
+    def test_not_waiting_for_a_dead_sheriff_tears_the_badge(self):
+        t = Table(D9, sheriff=True)
+        t.deal()
+        t.night(kill=4)
+        for s in t.day()['elect']['players']:
+            t.act(s, 'elect_run', run=s == 4)
+        t.flush()
+        for _ in range(6):                               # 只有 4 号上警：一路点下去，直到他当选
+            if t.g['sheriff']:
+                break
+            if t.stage() in ('e_speech', 'e_pk'):
+                t.act(1, 'elect_next')
+            elif t.stage() == 'e_withdraw':
+                t.act(4, 'elect_withdraw', out=False)
+            t.flush()
+        self.assertEqual(t.g['sheriff'], 4)
+        self.assertEqual(t.day()['settle']['waiting'], [4])       # 他昨晚被刀了，现在要决定警徽给谁
+        t.act(1, 'settle_close')
+        t.flush()
+        self.assertEqual(t.g['sheriff'], 0)
+        self.assertEqual(t.g['badge'], 'lost')
+        self.assertEqual(t.stage(), 'discuss')
+
+    def test_stalled_narration_can_be_taken_over_even_if_host_is_online(self):
+        t = Table(D9)
+        t.deal()
+        t.act(1, 'start_night')                          # 排上了「天黑请闭眼」，但房主手机一直没播完
+        self.assertTrue(t.view(1)['cues'])
+        with self.assertRaises(GameError):
+            t.act(2, 'take_host')                        # 才刚开始，不算卡住
+        t.room.sweep(now=time.time() + game.CUE_STALL - 5)
+        self.assertFalse(t.view(2)['stalled'])
+        t.room.sweep(now=time.time() + game.CUE_STALL + 30)
+        self.assertTrue(t.view(2)['stalled'])
+        self.assertTrue(t.view(2)['host_online'])
+        t.act(2, 'take_host')
+        v = t.view(2)
+        self.assertTrue(v['you']['host'])
+        self.assertFalse(v['stalled'])
+        self.assertEqual(v['cues'][0]['clips'], ['night_fall'])   # 新房主从没播完的那一句接着播
+        self.assertNotIn('cues', t.view(1))
+        t.room.ack(t.pid[2], v['cues'][0]['id'])
+        t.room.ack(t.pid[1], 999)                        # 原来那台手机迟到的回报不算数
+        self.assertEqual(t.room.phase, 'night')
+
+    def test_long_announcements_get_more_time_before_counting_as_stalled(self):
+        t = Table(D9)
+        t.room.cue(['elect_list'] + ['n%d' % i for i in range(1, 16)])
+        t.room.sweep(now=time.time() + game.CUE_STALL + 10)
+        self.assertFalse(t.room.stalled)
+        t.room.sweep(now=time.time() + game.CUE_STALL + 60)
+        self.assertTrue(t.room.stalled)
 
 
 class Fuzz(unittest.TestCase):
     """随机打很多局：必须都能打完，而且语音和界面始终对得上。"""
 
-    def play(self, roles, seed, sheriff):
+    def play(self, roles, seed, sheriff, chaos=False):
+        """chaos=True：一边打一边有人掉线、连回来、手机被冻住，房主掉线了就换人播报。"""
         r = random.Random(seed)
         t = Table(roles=full_roles(roles), seed=seed, sheriff=sheriff)
         t.act(1, 'deal')
         opened = [None]                      # 语音当前叫到的环节
+        clock = [time.time()]                # chaos 用的假时间
+        takeovers = [0]
+
+        def host_seat():
+            return t.room.players[t.room.host]['seat']
 
         def hear():
-            cues = t.view(1).get('cues') or []
+            cues = t.view(host_seat()).get('cues') or []
             if not cues:
                 return False
             for c in cues[0]['clips']:
@@ -1484,8 +1676,32 @@ class Fuzz(unittest.TestCase):
                 elif c.endswith('_close'):
                     self.assertEqual(opened[0], c[:-6])
                     opened[0] = None
-            t.ack_one()
+            t.heard += cues[0]['clips']
+            t.room.ack(t.room.host, cues[0]['id'])
             return True
+
+        def shake():
+            """随机让一个人断线 / 连回来 / 回应心跳，时间往前走一点，再让房间检查一遍。"""
+            pid = t.pid[r.choice(sorted(t.pid))]
+            pl = t.room.players[pid]
+            x = r.random()
+            if pl['conns'] and x < 0.5:
+                t.room.detach(pid, now=clock[0])
+            elif not pl['conns']:
+                t.room.attach(pid, hb=r.random() < 0.7, now=clock[0])
+            else:
+                t.room.touch(pid, now=clock[0])
+            clock[0] += r.choice([0.5, 2, 5, 9, 20])
+            for q in t.room.players.values():          # 大多数连着的手机会按时回应心跳
+                if q['conns'] and r.random() < 0.85:
+                    q['seen'] = clock[0]
+            t.room.sweep(now=clock[0])
+            v = t.view(r.choice(sorted(t.pid)))
+            if not v['host_online'] or v['stalled']:   # 播报停了：找一个在线的人接手
+                online = [x['seat'] for x in v['seats'] if x['online'] and not x['host']]
+                if online:
+                    t.act(r.choice(online), 'take_host')
+                    takeovers[0] += 1
 
         def night_move(s, pr):
             typ, ui = pr['type'], pr['ui']
@@ -1553,17 +1769,18 @@ class Fuzz(unittest.TestCase):
                         and not t.g['knight_used'] and r.random() < 0.1:
                     others = [x['seat'] for x in v['seats'] if x['alive'] and x['seat'] != s]
                     out.append((s, 'duel', {'target': r.choice(others)}))
-            v = t.view(1)
+            hs = host_seat()
+            v = t.view(hs)
             if ph == 'deal' and v['deal']['count'] == len(t.pid):
-                out.append((1, 'start_night', {}))
+                out.append((hs, 'start_night', {}))
             if ph == 'day':
                 stage = v['day']['stage']
                 if stage in ('discuss', 'pk'):
-                    out.append((1, 'start_vote', {}))
+                    out.append((hs, 'start_vote', {}))
                 if stage == 'dusk':
-                    out.append((1, 'start_night', {}))
+                    out.append((hs, 'start_night', {}))
                 if stage in ('e_speech', 'e_pk'):
-                    out.append((1, 'elect_next', {}))
+                    out.append((hs, 'elect_next', {}))
             return out
 
         for _ in range(20000):
@@ -1573,16 +1790,20 @@ class Fuzz(unittest.TestCase):
             for seat, typ in t.types().items():
                 self.assertEqual(typ, opened[0], '第%d局 %s' % (seed, t.heard[-6:]))
                 self.assertTrue(t.g['seats'][seat]['alive'])
+            if chaos and r.random() < 0.3:
+                shake()
             ms = moves()
-            if ms and (r.random() < 0.5 or not (t.view(1).get('cues') or t.clock.queue)):
+            if ms and (r.random() < 0.5 or not (t.view(host_seat()).get('cues') or t.clock.queue)):
                 s, typ, data = r.choice(ms)
                 t.act(s, typ, **data)
             elif not hear():
                 self.assertTrue(t.clock.run_next() or ms,
                                 '第%d局卡死：%s %s' % (seed, t.room.phase, t.stage()))
         self.assertEqual(t.room.phase, 'over', '第%d局没打完' % seed)
-        t.flush()
+        while hear() or t.clock.run_next():
+            pass
         self.assertIn(t.heard[-1], ('win_good', 'win_wolf', 'win_third'))
+        self.takeovers = getattr(self, 'takeovers', 0) + takeovers[0]
 
         # 每一夜的语音顺序都必须是规定的顺序
         step_clips = set(['night_fall', 'day_break'])
@@ -1622,6 +1843,15 @@ class Fuzz(unittest.TestCase):
                      witcher=1, psychic=1, gravekeeper=1, cupid=1, hunter=1)
         for seed in range(40):
             self.play(roles, 9000 + seed, sheriff=True)
+
+    def test_15_player_board_with_people_dropping_all_the_time(self):
+        """15 人 通灵师女巫猎人守卫骑士 + 狼王机械狼：不停有人掉线、换人播报，也必须每局都能打完。"""
+        roles = dict(wolf=3, wolfking=1, mech=1, villager=5, psychic=1, witch=1, hunter=1, guard=1, knight=1)
+        for seed in range(40):
+            self.play(roles, 15000 + seed, sheriff=seed % 2 == 0, chaos=True)
+        self.assertGreater(self.takeovers, 0)          # 确实测到了「换一台手机播报」
+        for i, preset in enumerate(PRESETS):
+            self.play(preset['roles'], 16000 + i, sheriff=True, chaos=True)
 
 
 if __name__ == '__main__':

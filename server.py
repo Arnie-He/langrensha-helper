@@ -17,10 +17,12 @@ import socket
 import sys
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import qr
+import game
 from game import GameError, PRESETS, ROLES, ROLE_ORDER, Room, clean_name, full_roles
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +30,9 @@ PUBLIC = os.path.join(ROOT, 'public')
 PORT = int(os.environ.get('PORT', '3210'))
 DEV = bool(os.environ.get('LRS_DEV'))      # 开发时设 LRS_DEV=1：图片不缓存，改完马上能看到
 ROOM_TTL = 6 * 3600          # 房间 6 小时没人动就清掉
-PING_EVERY = 8               # 每 8 秒给每台手机发一次心跳，用来发现掉线
+PING_EVERY = 5               # 每 5 秒给每台手机发一次心跳；手机收到后回应一下，两边都能发现连接是不是真的还通
+SWEEP_EVERY = 2              # 每 2 秒检查一遍谁真的掉线了、播报有没有卡住
+WRITE_TIMEOUT = 20           # 往一台手机发数据，这么久发不出去就当它断了
 
 TYPES = {
     '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -41,6 +45,12 @@ TYPES = {
 rooms = {}
 rooms_lock = threading.Lock()
 conns = {}                   # 房间号 -> [连接]；每个连接是 {'pid', 'q', 'last'}
+
+
+def oops():
+    """不该发生的错误：记到日志里（托管平台的日志页能看到），但不能让一个人的问题拖垮整个房间。"""
+    traceback.print_exc()
+    sys.stderr.flush()
 
 
 class FixedDeck(random.SystemRandom):
@@ -58,13 +68,28 @@ class FixedDeck(random.SystemRandom):
 def broadcast(room):
     """房间状态变了：给每台连着的手机推送它自己该看到的内容。"""
     for c in list(conns.get(room.code, [])):
-        view = room.view(c['pid'])
-        if view is None:
+        try:
+            view = room.view(c['pid'])
+            if view is None:
+                continue
+            msg = json.dumps(view, ensure_ascii=False, separators=(',', ':'))
+        except Exception:               # 某一个人的画面算不出来，不能连累其他人收不到
+            oops()
             continue
-        msg = json.dumps(view, ensure_ascii=False, separators=(',', ':'))
         if msg != c['last']:
             c['last'] = msg
             c['q'].put(msg)
+
+
+def sweeper():
+    """后台线程：定时让每个房间检查掉线和播报卡住。"""
+    while True:
+        time.sleep(SWEEP_EVERY)
+        for room in list(rooms.values()):
+            try:
+                room.sweep()
+            except Exception:
+                oops()
 
 
 def new_room():
@@ -129,10 +154,32 @@ class Handler(BaseHTTPRequestHandler):
     # -------------------------------------------------------------- GET
 
     def do_GET(self):
+        try:
+            self.get()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, socket.timeout):
+            pass
+        except Exception:
+            oops()
+            try:
+                self.fail('服务器出错了，请再试一次', 500)
+            except OSError:
+                pass
+
+    def get(self):
         url = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
         if url.path == '/api/events':
             return self.events(q)
+        if url.path == '/api/view':
+            # 实时连接在某些网络下不通时，手机改成每隔一两秒来取一次画面
+            room = rooms.get(q.get('code', ''))
+            p = room and room.auth(q.get('pid'), q.get('token'))
+            if not p:
+                return self.fail('房间不存在或已失效', 404)
+            room.touch(p['id'])
+            return self.send_json(room.view(p['id']))
+        if DEV and url.path == '/api/debug':
+            return self.debug(q)
         if url.path == '/api/info':
             return self.send_json({
                 'lan': lan_url(), 'presets': PRESETS,
@@ -149,6 +196,43 @@ class Handler(BaseHTTPRequestHandler):
         self.static(url.path)
 
     do_HEAD = do_GET
+
+    def debug(self, q):
+        """仅开发时可用（LRS_DEV=1），用来模拟网络故障：
+        act=stall  某个人的实时连接「假活着」sec 秒：连接不断，但什么都收不到
+        act=drop   服务器这边直接掐断某个人的实时连接
+        不给 pid 就是房主。"""
+        room = rooms.get(q.get('code', ''))
+        if not room:
+            return self.fail('房间不存在', 404)
+        if q.get('act') == 'state':                 # 服务器眼里这个房间现在的样子
+            g, now = room.g or {}, time.time()
+            nt, day = g.get('night') or {}, g.get('day') or {}
+            return self.send_json({
+                'phase': room.phase, 'night_no': g.get('night_no'),
+                'night': {'idx': nt.get('idx'), 'sub': nt.get('sub'), 'steps': nt.get('steps')} if nt else None,
+                'day': day.get('stage'), 'stalled': room.stalled,
+                'cues': [[c['id'], c['clips']] for c in room.cues], 'cue_age': round(now - room.cue_since, 1),
+                'host': room.players.get(room.host, {}).get('seat'),
+                'players': [{'seat': x['seat'], 'online': x['online'], 'conns': x['conns'],
+                             'quiet': round(now - x['seen'], 1), 'role': (g.get('seats') or {}).get(x['seat'], {}).get('role'),
+                             'alive': (g.get('seats') or {}).get(x['seat'], {}).get('alive')}
+                            for x in sorted(room.players.values(), key=lambda x: x['seat'])],
+                'conns': len(conns.get(room.code, [])), 'threads': threading.active_count()})
+        pid = q.get('pid') or room.host
+        seat = int(q.get('seat') or 0)
+        if seat:
+            pid = next((x['id'] for x in room.players.values() if x['seat'] == seat), pid)
+        hit = 0
+        for c in list(conns.get(room.code, [])):
+            if c['pid'] != pid:
+                continue
+            hit += 1
+            if q.get('act') == 'drop':
+                c['drop'] = True
+            else:
+                c['stall'] = time.time() + float(q.get('sec') or 30)
+        self.send_json({'ok': True, 'conns': hit})
 
     def static(self, path):
         if path == '/':
@@ -188,20 +272,30 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Connection', 'close')
         self.end_headers()
         self.close_connection = True
+        self.connection.settimeout(WRITE_TIMEOUT)     # 对面收不动了就别一直等
         c = {'pid': p['id'], 'q': queue.Queue(), 'last': None}
         conns[room.code].append(c)
-        room.attach(p['id'])
+        room.attach(p['id'], hb=q.get('hb') == '1')   # 这里会把当前画面推给刚连上的这条连接
         try:
-            self.wfile.write(b'retry: 1500\n\n')
-            while True:
+            # 开头垫一段空白：有些代理和内置浏览器要攒够一定字节才肯往下传
+            self.wfile.write(b'retry: 1500\n:' + b' ' * 2048 + b'\n\n')
+            self.wfile.flush()
+            next_ping, n = time.time() + PING_EVERY, 0
+            while not c.get('drop'):
                 try:
-                    msg = c['q'].get(timeout=PING_EVERY)
+                    msg = c['q'].get(timeout=max(0.05, min(1.0, next_ping - time.time())))
                 except queue.Empty:
-                    self.wfile.write(b': ping\n\n')
+                    msg = None
+                stalled = c.get('stall', 0) > time.time()
+                if msg is not None and not stalled:
+                    self.wfile.write(b'data: ' + msg.encode('utf-8') + b'\n\n')
                     self.wfile.flush()
-                    continue
-                self.wfile.write(b'data: ' + msg.encode('utf-8') + b'\n\n')
-                self.wfile.flush()
+                if time.time() >= next_ping:
+                    # 心跳是一条真正的事件（不是注释），手机端收得到，用它判断连接是不是还通
+                    next_ping, n = time.time() + PING_EVERY, n + 1
+                    if not stalled:
+                        self.wfile.write(('event: ping\ndata: %d\n\n' % n).encode('ascii'))
+                        self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             pass
         finally:
@@ -214,6 +308,18 @@ class Handler(BaseHTTPRequestHandler):
     # -------------------------------------------------------------- POST
 
     def do_POST(self):
+        try:
+            self.post()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, socket.timeout):
+            pass
+        except Exception:
+            oops()
+            try:
+                self.fail('服务器出错了，请再试一次', 500)
+            except OSError:
+                pass
+
+    def post(self):
         try:
             length = int(self.headers.get('Content-Length') or 0)
             if length > 65536:
@@ -251,11 +357,14 @@ class Handler(BaseHTTPRequestHandler):
                 p = room.claim(body.get('seat'), body.get('name'))
                 return self.send_json(self.cred(room, p))
 
-            if path == '/api/act':
+            if path in ('/api/act', '/api/beat'):
                 p = room.auth(body.get('pid'), body.get('token'))
                 if not p:
                     return self.fail('身份已失效，请重新进入房间', 403)
-                room.action(p['id'], body.get('type'), body.get('data'))
+                if path == '/api/beat':                     # 手机回应心跳：我还醒着
+                    room.touch(p['id'])
+                else:
+                    room.action(p['id'], body.get('type'), body.get('data'))
                 return self.send_json({'ok': True})
         except GameError as e:
             return self.fail(str(e))
@@ -271,8 +380,21 @@ class Server(ThreadingHTTPServer):
     request_queue_size = 128
 
 
+def start(port=None):
+    """启动服务器和后台检查线程，返回服务器对象（测试里也用它）。"""
+    if os.environ.get('LRS_FAST'):          # 仅供压力测试：把夜里的停顿和「假装操作」缩短到十分之一
+        game.PAUSE_AFTER_NIGHT_FALL, game.PAUSE_BETWEEN_ROLES = 0.3, 0.2
+        game.FAKE_ACT = {k: (lo / 10, hi / 10) for k, (lo, hi) in game.FAKE_ACT.items()}
+        game.FAKE_DEFAULT = (0.6, 1.1)
+    srv = Server(('0.0.0.0', PORT if port is None else port), Handler)
+    t = threading.Thread(target=sweeper)
+    t.daemon = True
+    t.start()
+    return srv
+
+
 def main():
-    srv = Server(('0.0.0.0', PORT), Handler)
+    srv = start()
     print('狼人杀面杀助手已启动')
     print('  本机打开:  http://localhost:%d' % PORT)
     lan = lan_url()
