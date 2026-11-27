@@ -96,8 +96,10 @@ def until(cond, sec=4.0):
 class Live(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.saved = (server.PING_EVERY, server.SWEEP_EVERY, server.DEV, game.OFFLINE_GRACE, game.ALIVE_FOR)
+        cls.saved = (server.PING_EVERY, server.SWEEP_EVERY, server.DEV, game.OFFLINE_GRACE, game.ALIVE_FOR,
+                     server.Handler.timeout)
         server.PING_EVERY, server.SWEEP_EVERY, server.DEV = PING, 0.05, True
+        server.Handler.timeout = 1.5
         game.OFFLINE_GRACE, game.ALIVE_FOR = GRACE, ALIVE
         cls.srv = server.start(port=0)
         cls.port = cls.srv.server_address[1]
@@ -109,10 +111,12 @@ class Live(unittest.TestCase):
     def tearDownClass(cls):
         cls.srv.shutdown()
         cls.srv.server_close()
-        server.PING_EVERY, server.SWEEP_EVERY, server.DEV, game.OFFLINE_GRACE, game.ALIVE_FOR = cls.saved
+        (server.PING_EVERY, server.SWEEP_EVERY, server.DEV, game.OFFLINE_GRACE, game.ALIVE_FOR,
+         server.Handler.timeout) = cls.saved
 
     def setUp(self):
         self.streams = []
+        server.hits.clear()                                      # 频率限制按测试分开算
 
     def tearDown(self):
         for s in self.streams:
@@ -140,6 +144,17 @@ class Live(unittest.TestCase):
 
     def qs(self, cred):
         return 'code=%s&pid=%s&token=%s' % (cred['code'], cred['pid'], cred['token'])
+
+    def game6(self):
+        """6 人局：甲是房主坐 1 号，另外 5 人依次入座，全部连上以后发牌。"""
+        a = post(self.port, '/api/create', {'name': '甲', 'roles': {'wolf': 2, 'villager': 2, 'seer': 1, 'witch': 1}})
+        creds = [a] + [post(self.port, '/api/join', {'code': a['code'], 'name': '玩家%d' % i}) for i in range(2, 7)]
+        for i, c in enumerate(creds):
+            self.act(c, 'sit', seat=i + 1)
+        streams = [self.open(c) for c in creds]
+        self.assertTrue(until(lambda: all(x.view and x.view['seats'][5]['online'] for x in streams[:1])))
+        self.assertTrue(until(lambda: self.act(a, 'deal').get('ok')))
+        return creds, streams
 
     # -- 测试
     def test_a_new_connection_gets_the_current_view_at_once_and_then_heartbeats(self):
@@ -245,6 +260,122 @@ class Live(unittest.TestCase):
             sys.stderr.close()
             sys.stderr = err
             room.view = real
+
+    def test_claiming_a_seat_needs_the_host_and_cuts_off_the_old_phone(self):
+        creds, streams = self.game6()
+        a, b = creds[0], creds[1]
+        frozen = self.open(b, hb=True)                           # 2 号手机：锁屏了，连接还开着，但不回应心跳
+        self.assertTrue(until(lambda: frozen.view))
+        streams[1].cut()
+        self.assertTrue(until(lambda: not streams[0].view['seats'][1]['online'], ALIVE * 4))
+        j = post(self.port, '/api/join', {'code': a['code'], 'name': '旁人'})
+        self.assertEqual([x['seat'] for x in j['claim']], [2])
+        r = post(self.port, '/api/claim', {'code': a['code'], 'seat': 2, 'name': '旁人'})
+        self.assertEqual(r['state'], 'wait')
+        self.assertNotIn('pid', r)                               # 没有房主同意，拿不到这个座位的身份
+        rid = r['rid']
+        self.assertEqual(post(self.port, '/api/claim', {'code': a['code'], 'rid': rid})['state'], 'wait')
+        self.assertTrue(until(lambda: streams[0].view.get('claims')))
+        self.assertEqual(streams[0].view['claims'][0]['seat'], 2)
+        self.assertNotIn('claims', streams[2].view)
+        self.assertEqual(self.act(b, 'claim_ok', rid=rid).get('status'), 400)   # 只有房主能同意
+        self.assertTrue(self.act(a, 'claim_ok', rid=rid).get('ok'))
+        c = post(self.port, '/api/claim', {'code': a['code'], 'rid': rid})
+        self.assertEqual(c['pid'], b['pid'])
+        self.assertNotEqual(c['token'], b['token'])
+        self.assertTrue(until(lambda: frozen.closed))           # 旧手机上还开着的连接被掐断，收不到这个座位的私密信息了
+        self.assertEqual(get(self.port, '/api/view?' + self.qs(b))['status'], 404)
+        self.assertEqual(get(self.port, '/api/view?' + self.qs(c))['you']['seat'], 2)
+
+    def test_an_oversized_request_closes_the_connection(self):
+        """请求体太大、没有读：这条连接必须关掉，否则剩下的字节会被当成下一个请求执行。"""
+        sock = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+        sock.sendall(b'POST /api/act HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n'
+                     b'Content-Length: 70000\r\n\r\nGET /healthz HTTP/1.1\r\nHost: x\r\n\r\n')
+        data = b''
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        except socket.timeout:
+            pass
+        sock.close()
+        self.assertIn(b' 413 ', data.split(b'\r\n')[0])
+        self.assertEqual(data.count(b'HTTP/1.1 '), 1)
+
+    def test_requests_have_a_timeout_in_production(self):
+        self.assertTrue(self.saved[5] and 0 < self.saved[5] <= 300)   # 没有超时的话，一走了之的手机会永远占着一个线程
+
+    def test_idle_connections_are_closed(self):
+        sock = socket.create_connection(('127.0.0.1', self.port), timeout=10)
+        t0 = time.time()
+        self.assertEqual(sock.recv(10), b'')                     # 什么都不发：一会儿以后服务器自己关掉
+        self.assertLess(time.time() - t0, 5)
+        sock.close()
+
+    def test_dev_switch_only_turns_on_for_yes_values(self):
+        try:
+            for v, want in (('1', True), ('true', True), ('YES', True), ('0', False), ('', False), ('no', False)):
+                os.environ['LRS_TEST_FLAG'] = v
+                self.assertEqual(server.flag('LRS_TEST_FLAG'), want, v)
+        finally:
+            os.environ.pop('LRS_TEST_FLAG', None)
+
+    def test_room_creation_cannot_be_exhausted(self):
+        saved, made = server.MAX_ROOMS, []
+        server.MAX_ROOMS = len(server.rooms) + 3
+        try:
+            for _ in range(3):
+                made.append(server.new_room().code)
+            with self.assertRaises(game.GameError):
+                server.new_room()                                # 满了：报错，而不是卡死
+            server.rooms[made[0]].touched -= 3600                # 有个房间很久没人动了：清掉，给新房间腾地方
+            made.append(server.new_room().code)
+            self.assertNotIn(made[0], server.rooms)
+        finally:
+            server.MAX_ROOMS = saved
+            for c in made:
+                server.rooms.pop(c, None)
+                server.conns.pop(c, None)
+
+    def test_creating_rooms_is_rate_limited_per_address(self):
+        saved, server.CREATE_LIMIT = server.CREATE_LIMIT, (3, 60)
+        try:
+            for _ in range(3):
+                self.assertIn('pid', post(self.port, '/api/create', {'name': '甲'}))
+            self.assertEqual(post(self.port, '/api/create', {'name': '甲'})['status'], 429)
+        finally:
+            server.CREATE_LIMIT = saved
+
+    def test_claim_requests_are_rate_limited_per_address(self):
+        creds, streams = self.game6()
+        streams[1].cut()
+        self.assertTrue(until(lambda: not streams[0].view['seats'][1]['online'], ALIVE * 4))
+        saved, server.CLAIM_LIMIT = server.CLAIM_LIMIT, (2, 60)
+        try:
+            for _ in range(2):
+                self.assertEqual(post(self.port, '/api/claim', {'code': creds[0]['code'], 'seat': 2})['state'], 'wait')
+            self.assertEqual(post(self.port, '/api/claim', {'code': creds[0]['code'], 'seat': 2})['status'], 429)
+        finally:
+            server.CLAIM_LIMIT = saved
+
+    def test_a_full_server_drops_rooms_nobody_ever_used_first(self):
+        saved, made = server.MAX_ROOMS, []
+        server.MAX_ROOMS = len(server.rooms) + 2
+        try:
+            for _ in range(2):
+                made.append(server.new_room().code)
+            for c in made:
+                server.rooms[c].created -= 120                   # 刷出来的空房间：一分钟以上没人连过
+            made.append(server.new_room().code)                  # 满了也不报错：先清掉这种房间
+            self.assertEqual(sum(1 for c in made if c in server.rooms), 2)
+        finally:
+            server.MAX_ROOMS = saved
+            for c in made:
+                server.rooms.pop(c, None)
+                server.conns.pop(c, None)
 
     def test_bad_credentials_are_rejected(self):
         a, b = self.room()

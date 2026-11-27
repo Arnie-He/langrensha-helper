@@ -1067,6 +1067,24 @@ class Cupid(unittest.TestCase):
         t.night(kill=0)
         self.assertNotIn('cupid_open', t.heard)              # 只有第一夜
 
+    def test_host_skipping_cupid_leaves_no_lovers_and_nobody_stuck(self):
+        """丘比特一直不选，房主跳过：这一局没有情侣。丘比特自己的画面不能因此出错（他要是房主，播报就停了）。"""
+        t = Table(['cupid'] + ['wolf'] * 4 + ['villager'] * 4 + ['seer', 'witch', 'hunter'])    # 房主就是丘比特
+        t.deal()
+        t.act(1, 'start_night')
+        t.flush()
+        self.assertEqual(t.types(), {1: 'cupid'})
+        t.act(1, 'skip')
+        t.flush()
+        self.assertEqual(len(t.types()), 12)                 # 情侣确认环节照常进行，看不出有没有连
+        for s in t.pid:
+            t.view(s)                                        # 每个人的画面都算得出来
+        self.assertEqual(t.prompts()[1]['title'], '这一局没有情侣')
+        self.assertEqual(t.prompts()[5]['title'], '你没有被选为情侣')
+        t.night(kill=0)
+        self.assertEqual(t.g['lovers'], [])
+        self.assertEqual(t.room.phase, 'day')
+
     def test_lovers_die_together_in_the_day(self):
         t = Table(self.D)
         t.deal()
@@ -1455,11 +1473,14 @@ class Lobby(unittest.TestCase):
         t = Table(D9)
         t.deal()
         with self.assertRaises(GameError):
-            t.room.claim(5, '新手机')                        # 还在线，不能抢
+            t.room.request_claim(5, '新手机')                # 还在线，不能抢
         t.drop(5)
         self.assertEqual([x['seat'] for x in t.room.offline_seats()], [5])
         old_token = t.room.players[t.pid[5]]['token']
-        p = t.room.claim(5, '新手机')
+        rid = t.room.request_claim(5, '新手机')
+        t.act(1, 'claim_ok', rid=rid)
+        state, p = t.room.claim_status(rid)
+        self.assertEqual((state, p['id'], p['name']), ('ok', t.pid[5], '新手机'))
         self.assertNotEqual(p['token'], old_token)
         self.assertIsNone(t.room.auth(p['id'], old_token))
 
@@ -1513,7 +1534,8 @@ class Connections(unittest.TestCase):
     def test_a_frozen_phone_goes_offline_when_it_stops_answering_heartbeats(self):
         t = Table(D9)
         now = time.time()
-        t.room.attach(t.pid[5], hb=True, now=now)        # 新版页面：会回应心跳
+        t.room.detach(t.pid[5], now=now)
+        t.room.attach(t.pid[5], hb=True, now=now)        # 换成新版页面：会回应心跳
         t.room.sweep(now=now + game.ALIVE_FOR - 1)
         self.assertTrue(self.online(t, 5))
         t.room.sweep(now=now + game.ALIVE_FOR + 1)
@@ -1522,6 +1544,20 @@ class Connections(unittest.TestCase):
         self.assertTrue(self.online(t, 5))
         t.room.sweep(now=now + 600)                      # 4 号的页面不回应心跳（老版本 / 脚本），只看连接
         self.assertTrue(self.online(t, 4))
+
+    def test_heartbeat_silence_only_counts_when_every_connection_answers_heartbeats(self):
+        t = Table(D9)                                    # 5 号已经有一条不回应心跳的老连接
+        now = time.time()
+        t.room.attach(t.pid[5], hb=True, now=now)        # 又开了一个新版页面……
+        t.room.detach(t.pid[5], hb=True, now=now + 1)    # ……然后关掉了。剩下的还是那条老连接
+        t.room.sweep(now=now + 600)
+        self.assertTrue(self.online(t, 5))               # 不能因为它不回应心跳就判它掉线
+        t.room.attach(t.pid[6], hb=True, now=now)        # 6 号：一条老连接 + 一条新连接同时在
+        t.room.sweep(now=now + 600)
+        self.assertTrue(self.online(t, 6))
+        t.room.detach(t.pid[6], now=now + 601)           # 老连接断了，只剩会回应心跳的那条，而它一直没回应
+        t.room.sweep(now=now + 700)
+        self.assertFalse(self.online(t, 6))
 
     def test_a_phone_that_can_only_poll_stays_online_while_it_polls(self):
         t = Table(D9)
@@ -1544,6 +1580,20 @@ class Connections(unittest.TestCase):
         self.assertIn(p['id'], t.room.players)           # 可能只是刷新了一下页面
         t.room.sweep(now=now + 60)
         self.assertNotIn(p['id'], t.room.players)
+
+    def test_people_who_joined_but_never_connected_are_forgotten_too(self):
+        t = Table(D9)
+        ghost = t.room.add_player('没连上')
+        seated = t.room.add_player('占了座但没连上')
+        t.act(9, 'stand')
+        t.room.action(seated['id'], 'sit', {'seat': 9})
+        now = time.time()
+        t.room.sweep(now=now + game.GHOST_AFTER - 5)
+        self.assertIn(ghost['id'], t.room.players)        # 也许只是网慢
+        t.room.sweep(now=now + game.GHOST_AFTER + 5)
+        self.assertNotIn(ghost['id'], t.room.players)
+        self.assertIn(seated['id'], t.room.players)       # 占着座位的人不动，由房主决定请不请离
+        self.assertIn(t.host, t.room.players)
 
     def test_someone_who_was_offline_can_come_back_and_act(self):
         t = Table(D12)
@@ -1642,6 +1692,17 @@ class Connections(unittest.TestCase):
         t.room.ack(t.pid[1], 999)                        # 原来那台手机迟到的回报不算数
         self.assertEqual(t.room.phase, 'night')
 
+    def test_stalled_does_not_outlive_the_game_it_happened_in(self):
+        t = Table(D9)
+        t.deal()
+        t.act(1, 'start_night')
+        t.room.sweep(now=time.time() + game.CUE_STALL + 30)
+        self.assertTrue(t.view(2)['stalled'])
+        t.act(1, 'abort')                                # 房主结束了这一局
+        self.assertFalse(t.view(2)['stalled'])           # 大厅里没有话要播，谈不上卡住
+        with self.assertRaises(GameError):
+            t.act(2, 'take_host')                        # 房主好好的，不能被人顺手拿走
+
     def test_long_announcements_get_more_time_before_counting_as_stalled(self):
         t = Table(D9)
         t.room.cue(['elect_list'] + ['n%d' % i for i in range(1, 16)])
@@ -1649,6 +1710,314 @@ class Connections(unittest.TestCase):
         self.assertFalse(t.room.stalled)
         t.room.sweep(now=time.time() + game.CUE_STALL + 60)
         self.assertTrue(t.room.stalled)
+
+
+class EdgeCases(unittest.TestCase):
+    """审查时发现的边界情况，每一条都先复现出问题，修好以后留在这里防止回退。"""
+
+    def test_claiming_a_seat_needs_the_hosts_ok(self):
+        """知道房间号的人不能趁别人锁屏顶掉他的座位、看他的身份：认领要房主同意。"""
+        t = Table(D9)
+        t.deal()
+        t.drop(5)
+        rid = t.room.request_claim(5, '新手机')
+        self.assertEqual(t.room.claim_status(rid), ('wait', None))
+        self.assertEqual(t.view(1)['claims'], [{'rid': rid, 'seat': 5, 'name': '新手机'}])
+        self.assertNotIn('claims', t.view(2))                     # 只有房主看得到
+        old = t.room.players[t.pid[5]]['token']
+        with self.assertRaises(GameError):
+            t.act(2, 'claim_ok', rid=rid)                          # 只有房主能同意
+        self.assertEqual(t.room.players[t.pid[5]]['token'], old)
+        revoked = []
+        t.room.on_revoke = lambda room, pid: revoked.append(pid)
+        t.act(1, 'claim_ok', rid=rid)
+        self.assertEqual(t.room.claim_status(rid)[0], 'ok')
+        self.assertIsNone(t.room.auth(t.pid[5], old))              # 旧手机的身份作废
+        self.assertEqual(revoked, [t.pid[5]])                      # 并且让服务器掐断旧手机的连接
+        self.assertEqual(t.view(1)['claims'], [])
+
+    def test_a_claim_is_void_when_the_seat_comes_back_refused_or_old(self):
+        t = Table(D9)
+        t.deal()
+        t.drop(5)
+        rid = t.room.request_claim(5, '甲')
+        t.room.attach(t.pid[5])                                    # 原来的手机回来了：只是锁屏了一会儿
+        self.assertEqual(t.room.claim_status(rid)[0], 'no')
+        self.assertEqual(t.view(1)['claims'], [])
+        with self.assertRaises(GameError):
+            t.act(1, 'claim_ok', rid=rid)
+        t.drop(6)
+        rid = t.room.request_claim(6, '乙')
+        t.act(1, 'claim_no', rid=rid)
+        self.assertEqual(t.room.claim_status(rid)[0], 'no')
+        now = time.time()
+        rid = t.room.request_claim(6, '丙', now=now)
+        self.assertEqual(t.room.claim_status(rid, now=now + game.CLAIM_TTL + 1)[0], 'gone')
+        self.assertEqual(t.room.claim_status('不存在')[0], 'gone')
+        lobby = Table(D9)
+        lobby.drop(5)
+        with self.assertRaises(GameError):
+            lobby.room.request_claim(5, '丁')                       # 还没发牌：直接选座位就行
+
+    def test_an_approved_claim_id_stops_working_once_the_seat_is_claimed_again(self):
+        t = Table(D9)
+        t.deal()
+        t.drop(5)
+        rid1 = t.room.request_claim(5, '甲')
+        t.act(1, 'claim_ok', rid=rid1)
+        tok1 = t.room.claim_status(rid1)[1]['token']
+        rid2 = t.room.request_claim(5, '乙')                       # 那台手机又丢了，再换一台
+        t.act(1, 'claim_ok', rid=rid2)
+        self.assertEqual(t.room.claim_status(rid1)[0], 'gone')     # 第一台手机拿旧编号取不到新身份
+        st, p = t.room.claim_status(rid2)
+        self.assertEqual(st, 'ok')
+        self.assertNotEqual(p['token'], tok1)
+
+    def test_a_claim_approved_just_before_it_expires_can_still_be_collected(self):
+        t = Table(D9)
+        t.deal()
+        t.drop(5)
+        rid = t.room.request_claim(5, '甲', now=time.time() - game.CLAIM_TTL + 5)    # 申请快 5 分钟了
+        t.act(1, 'claim_ok', rid=rid)
+        self.assertEqual(t.room.claim_status(rid, now=time.time() + 30)[0], 'ok')     # 批准以后重新计时
+        self.assertEqual(t.room.claim_status(rid, now=time.time() + 20 * 60)[0], 'ok')  # 手机锁屏了二十分钟才拿起来
+        self.assertEqual(t.room.claim_status(rid, now=time.time() + game.CLAIM_HOLD + 1)[0], 'gone')
+
+    def test_only_the_newest_claim_for_a_seat_is_shown(self):
+        t = Table(D9)
+        t.deal()
+        t.drop(5)
+        rid1 = t.room.request_claim(5, '甲')
+        rid2 = t.room.request_claim(5, '乙')
+        self.assertEqual(t.room.claim_status(rid1)[0], 'no')
+        self.assertEqual([c['rid'] for c in t.view(1)['claims']], [rid2])
+
+    def test_cancelling_after_approval_still_hands_over_the_seat(self):
+        t = Table(D9)
+        t.deal()
+        t.drop(5)
+        rid = t.room.request_claim(5, '甲')
+        t.act(1, 'claim_ok', rid=rid)
+        st, p = t.room.cancel_claim(rid)                             # 撤回晚到了一步
+        self.assertEqual((st, p['id']), ('ok', t.pid[5]))
+
+    def test_repeat_claims_for_one_seat_do_not_block_other_seats(self):
+        t = Table(D9)
+        t.deal()
+        t.drop(5)
+        t.drop(9)
+        for _ in range(30):                                        # 一直刷新认领页面，或者有人捣乱
+            t.room.request_claim(5, '捣乱')
+        rid = t.room.request_claim(9, '猎人')                      # 9 号照样能申请
+        self.assertEqual(t.room.claim_status(rid)[0], 'wait')
+        self.assertEqual(sorted(c['seat'] for c in t.view(1)['claims']), [5, 9])
+
+    def test_claim_records_do_not_pile_up(self):
+        t = Table(D9)
+        t.deal()
+        t.drop(5)
+        for _ in range(500):                                       # 申请、撤回、再申请……
+            t.room.cancel_claim(t.room.request_claim(5, '甲'))
+        self.assertLessEqual(len(t.room.claims), game.CLAIM_KEEP)
+        rid = t.room.request_claim(5, '甲')
+        self.assertEqual(t.room.claim_status(rid)[0], 'wait')
+
+    def test_an_unanswered_claim_disappears_from_the_host_when_it_expires(self):
+        t = Table(D9)
+        t.deal()
+        t.drop(5)
+        rid = t.room.request_claim(5, '甲', now=time.time() - game.CLAIM_TTL - 1)
+        t.room.sweep()
+        self.assertEqual(t.view(1)['claims'], [])
+        with self.assertRaises(GameError):                         # 过期的横幅点同意也不会生效
+            t.act(1, 'claim_ok', rid=rid)
+
+    def test_kick_does_not_remove_a_newcomer_with_the_same_name(self):
+        t = Table(D9)
+        t.act(9, 'stand')
+        p = t.room.add_player('玩家')
+        t.room.attach(p['id'])
+        t.room.action(p['id'], 'sit', {'seat': 9})
+        seen = t.view(1)['seats'][8]                               # 房主点了 9 号，确认框打开
+        t.room.action(p['id'], 'stand', {})
+        q = t.room.add_player('玩家')                              # 另一个也叫「玩家」的人坐了上来
+        t.room.attach(q['id'])
+        t.room.action(q['id'], 'sit', {'seat': 9})
+        with self.assertRaises(GameError):
+            t.act(1, 'kick', seat=9, name=seen['name'], sat=seen['sat'])
+        self.assertEqual(t.room.seat_map()[9]['id'], q['id'])
+        now = t.view(1)['seats'][8]
+        t.act(1, 'kick', seat=9, name=now['name'], sat=now['sat'])
+        self.assertNotIn(9, t.room.seat_map())
+
+    def test_whoever_takes_over_narration_cannot_approve_claims_for_other_seats(self):
+        t = Table(D9)
+        t.deal()
+        t.drop(1)                                                  # 房主的手机没了
+        t.act(2, 'take_host')                                      # 2 号接手播报
+        t.drop(4)                                                  # 4 号锁屏
+        rid = t.room.request_claim(4, '4号')                       # 2 号用另一台手机冒充 4 号
+        self.assertEqual(t.view(2)['claims'], [])                  # 接手播报的人看不到这条申请
+        with self.assertRaises(GameError):
+            t.act(2, 'claim_ok', rid=rid)                          # 也批准不了
+        with self.assertRaises(GameError):
+            t.act(2, 'claim_no', rid=rid)
+        self.assertEqual(t.room.claim_status(rid)[0], 'wait')
+        with self.assertRaises(GameError):
+            t.act(2, 'deal')                                       # 游戏中途点「发牌」也拿不到批准权
+        with self.assertRaises(GameError):
+            t.act(2, 'claim_ok', rid=rid)
+        mine = t.room.request_claim(1, '房主')                     # 原来的房主借了一台手机回来：这个可以批准
+        self.assertEqual([c['rid'] for c in t.view(2)['claims']], [mine])
+        t.act(2, 'claim_ok', rid=mine)
+        t.room.attach(t.pid[1])
+        self.assertEqual([c['rid'] for c in t.view(1)['claims']], [rid])   # 由他来决定 4 号的申请
+        t.act(1, 'claim_no', rid=rid)
+        self.assertEqual(t.room.claim_status(rid)[0], 'no')
+
+    def test_a_host_without_a_seat_hands_claims_to_whoever_narrates(self):
+        t = Table(D9)
+        t.act(1, 'stand')                                          # 房主不入座，只负责播报
+        extra = t.room.add_player('玩家1')
+        t.room.attach(extra['id'])
+        t.room.action(extra['id'], 'sit', {'seat': 1})
+        t.pid[1] = extra['id']
+        t.room.action(t.host, 'deal', {})
+        t.room.detach(t.host)
+        t.room.sweep(now=time.time() + 60)
+        t.act(2, 'take_host')
+        t.drop(4)
+        rid = t.room.request_claim(4, '4号')
+        t.act(2, 'claim_ok', rid=rid)                              # 原来的房主回不来了，只能由现在播报的人处理
+        self.assertEqual(t.room.claim_status(rid)[0], 'ok')
+
+    def test_kick_only_removes_the_person_the_host_saw(self):
+        t = Table(D9)
+        with self.assertRaises(GameError):
+            t.act(1, 'kick', seat=5, name='别人')                   # 确认框打开以后，座位上换了人
+        self.assertIn(5, t.room.seat_map())
+        t.act(1, 'kick', seat=5, name='玩家5')
+        self.assertNotIn(5, t.room.seat_map())
+
+    def test_not_waiting_only_covers_the_people_the_host_saw(self):
+        deck = ['villager', 'wolfking', 'wolf', 'wolf', 'villager', 'villager', 'seer', 'witch', 'hunter']
+        t = Table(deck)
+        t.deal()
+        t.night(kill=5)
+        t.confirm_dead()
+        t.act(1, 'start_vote')
+        for s in t.day()['vote']['voters']:
+            t.act(s, 'vote', target=9)
+        t.flush()
+        self.assertEqual(t.day()['settle']['waiting'], [9])        # 猎人被放逐
+        t.act(9, 'settle', target=2)                               # 就在房主点「不等了」的那一刻，猎人带走了狼王
+        self.assertEqual(t.day()['settle']['waiting'], [2])
+        t.act(1, 'settle_close', seats=[9])                        # 房主点的时候屏幕上只有 9 号
+        self.assertEqual(t.day()['settle']['waiting'], [2])        # 狼王的枪还在
+        self.assertTrue(t.day(2)['settle']['mine']['can_shoot'])
+        t.act(1, 'settle_close', seats=[2])
+        t.flush()
+        self.assertEqual(t.stage(), 'dusk')
+
+    def _knight_sheriff(self):
+        """9 号骑士当选警长，还没选发言顺序。"""
+        deck = ['villager', 'wolf', 'wolf', 'wolf', 'villager', 'villager', 'seer', 'witch', 'knight']
+        t = Table(deck, sheriff=True)
+        t.deal()
+        t.night(kill=0)
+        for s in range(1, 10):
+            t.act(s, 'elect_run', run=s == 9)
+        t.flush()
+        t.act(1, 'elect_next')
+        t.act(9, 'elect_withdraw', out=False)
+        t.flush()
+        t.confirm_dead()
+        self.assertEqual(t.g['sheriff'], 9)
+        self.assertTrue(t.day(9)['order']['mine'])
+        t.act(9, 'duel', target=5)                                 # 5 号是好人：骑士出局
+        t.flush()
+        self.assertEqual(t.day()['settle']['waiting'], [9])
+        t.heard = []
+        return t
+
+    def test_knight_sheriff_who_loses_a_duel_before_choosing_the_order(self):
+        t = self._knight_sheriff()
+        t.act(9, 'settle', target=0, badge=0)                      # 撕掉警徽：没有警长了
+        t.flush()
+        d = t.day(2)
+        self.assertEqual(d['stage'], 'discuss')
+        self.assertNotIn('order', d)                               # 不能一直挂着「等警长选发言顺序」
+        self.assertIsNotNone(d['speak'])
+        self.assertIn('discuss', t.heard)
+        sp = t.room.add_player('旁观')
+        with self.assertRaises(GameError):
+            t.room.action(sp['id'], 'order', {'i': 0})             # 没座位的人更不能替警长选
+
+        t = self._knight_sheriff()
+        t.act(9, 'settle', target=0, badge=7)                      # 警徽交给 7 号：由新警长选，从他两边开始
+        t.flush()
+        d = t.day(7)
+        self.assertTrue(d['order']['mine'])
+        self.assertEqual(d['order']['opts'], [{'start': 8, 'dir': 1}, {'start': 6, 'dir': -1}])
+        self.assertIn('order_ask', t.heard)
+        t.act(7, 'order', i=0)
+        self.assertEqual(t.day()['speak'], {'start': 8, 'dir': 1})
+
+    def test_mech_second_knife_alone_is_an_ordinary_knife(self):
+        t = Table(board('mech', 'psychic', 'witch', 'hunter', 'guard'))
+        t.deal()
+        t.night(kill=0, mech=1)                                    # 学到狼人：一次双刀
+        for w in (1, 2, 3):
+            t.exile(w)
+            if w != 3:
+                t.night(kill=0)
+        t.confirm_dead()
+        t.act(1, 'start_night')
+        t.flush()
+        t.act(12, 'night', skip=True)                              # 守卫空守
+        t.flush()
+        t.act(4, 'night', ok=True)
+        t.flush()
+        t.act(4, 'wolf_pick', target=0)                            # 第一刀空着
+        t.act(4, 'wolf_extra', target=6)                           # 只用了「第二刀」
+        t.act(4, 'wolf_confirm')
+        t.flush()
+        pr = t.prompts()[10]
+        self.assertEqual((pr['victim'], pr['can_save']), (6, True))  # 女巫看得到刀口，能救
+        t.night(save=True)
+        self.assertEqual(t.day()['night_deaths'], [])
+        self.assertTrue(t.g['mech']['double'])                     # 双刀没有用掉
+
+    def test_skip_only_skips_the_step_the_host_meant(self):
+        t = Table(D12)                                             # 12 号守卫
+        t.deal()
+        t.act(1, 'start_night')
+        t.flush()
+        self.assertEqual(t.types(), {12: 'guard'})
+        key = t.view(1)['skip_key']
+        self.assertNotIn('skip_key', t.view(2))
+        t.act(12, 'night', targets=[5])                            # 房主正在犹豫要不要跳过，守卫自己做完了
+        t.flush()
+        self.assertEqual(set(t.types().values()), {'wolf'})
+        with self.assertRaises(GameError):
+            t.act(1, 'skip', key=key)                              # 不能把狼人跳过去
+        self.assertEqual(set(t.types().values()), {'wolf'})
+        t.act(1, 'skip', key=t.view(1)['skip_key'])
+        t.flush()
+        self.assertNotIn('wolf', t.types().values())
+
+    def test_dealing_clears_a_stalled_flag_from_the_lobby(self):
+        t = Table(D9)
+        t.act(1, 'test')                                           # 试音，但房主手机没播出来
+        t.room.sweep(now=time.time() + game.CUE_STALL + 30)
+        self.assertTrue(t.view(2)['stalled'])
+        t.act(1, 'deal')
+        self.assertFalse(t.view(2)['stalled'])                     # 「发牌」这一句才刚开始
+        with self.assertRaises(GameError):
+            t.act(2, 'take_host')
+
+    def test_knight_card_matches_when_a_duel_is_allowed(self):
+        self.assertIn('不含警长竞选和 PK', ROLES['knight']['desc'])
 
 
 class Fuzz(unittest.TestCase):
@@ -1696,6 +2065,16 @@ class Fuzz(unittest.TestCase):
                 if q['conns'] and r.random() < 0.85:
                     q['seen'] = clock[0]
             t.room.sweep(now=clock[0])
+            if t.room.phase != 'lobby' and r.random() < 0.1:   # 有人换了手机，申请回到自己掉线的座位
+                off = [x['seat'] for x in t.room.offline_seats()]
+                if off:
+                    rid = t.room.request_claim(r.choice(off), '')
+                    who = [t.room.players[x]['seat'] for x in (t.room.host, t.room.owner) if t.room.players[x]['seat']]
+                    if who and r.random() < 0.8:                      # 现在的房主或者发牌时的房主去处理
+                        try:
+                            t.act(r.choice(who), 'claim_ok' if r.random() < 0.6 else 'claim_no', rid=rid)
+                        except GameError:
+                            pass
             v = t.view(r.choice(sorted(t.pid)))
             if not v['host_online'] or v['stalled']:   # 播报停了：找一个在线的人接手
                 online = [x['seat'] for x in v['seats'] if x['online'] and not x['host']]
@@ -1781,6 +2160,18 @@ class Fuzz(unittest.TestCase):
                     out.append((hs, 'start_night', {}))
                 if stage in ('e_speech', 'e_pk'):
                     out.append((hs, 'elect_next', {}))
+            if chaos:
+                # 房主的各种「不等了」：有人掉线时真实的房主就会这么点，而且常常点得不是时候
+                if ph == 'night' and t.g['night']['sub'] == 'act' and r.random() < 0.12:
+                    out.append((hs, 'skip', {}))
+                if ph == 'day':
+                    stage = v['day']['stage']
+                    if stage in ('e_signup', 'e_withdraw', 'e_vote') and r.random() < 0.1:
+                        out.append((hs, 'elect_close', {}))
+                    if stage == 'vote' and r.random() < 0.1:
+                        out.append((hs, 'end_vote', {}))
+                    if stage == 'settle' and r.random() < 0.15:
+                        out.append((hs, 'settle_close', {}))
             return out
 
         for _ in range(20000):
@@ -1851,7 +2242,18 @@ class Fuzz(unittest.TestCase):
             self.play(roles, 15000 + seed, sheriff=seed % 2 == 0, chaos=True)
         self.assertGreater(self.takeovers, 0)          # 确实测到了「换一台手机播报」
         for i, preset in enumerate(PRESETS):
-            self.play(preset['roles'], 16000 + i, sheriff=True, chaos=True)
+            for k in range(3):
+                self.play(preset['roles'], 16000 + i * 10 + k, sheriff=k != 1, chaos=True)
+        # 所有角色混在一起，再加上掉线和房主乱点「不等了」
+        roles = dict(wolf=1, wolfking=1, whitewolf=1, beauty=1, nightmare=1, mech=1, gargoyle=1,
+                     villager=3, seer=1, witch=1, hunter=1, guard=1, knight=1, dreamer=1,
+                     magician=1, cupid=1)
+        for seed in range(30):
+            self.play(roles, 17000 + seed, sheriff=True, chaos=True)
+        roles = dict(wolf=2, bloodmoon=1, ghostrider=1, villager=4, seer=1, witch=1, idiot=1,
+                     witcher=1, psychic=1, gravekeeper=1, cupid=1, hunter=1)
+        for seed in range(30):
+            self.play(roles, 18000 + seed, sheriff=True, chaos=True)
 
 
 if __name__ == '__main__':

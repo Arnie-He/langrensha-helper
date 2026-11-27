@@ -28,11 +28,22 @@ from game import GameError, PRESETS, ROLES, ROLE_ORDER, Room, clean_name, full_r
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, 'public')
 PORT = int(os.environ.get('PORT', '3210'))
-DEV = bool(os.environ.get('LRS_DEV'))      # 开发时设 LRS_DEV=1：图片不缓存，改完马上能看到
+
+
+def flag(name):
+    """环境变量开关：只有 1 / true / yes / on 算打开（LRS_DEV=0 是关）。"""
+    return os.environ.get(name, '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+DEV = flag('LRS_DEV')        # 开发时设 LRS_DEV=1：图片不缓存，改完马上能看到；还会打开 /api/debug（能看到所有人的身份）
 ROOM_TTL = 6 * 3600          # 房间 6 小时没人动就清掉
 PING_EVERY = 5               # 每 5 秒给每台手机发一次心跳；手机收到后回应一下，两边都能发现连接是不是真的还通
 SWEEP_EVERY = 2              # 每 2 秒检查一遍谁真的掉线了、播报有没有卡住
 WRITE_TIMEOUT = 20           # 往一台手机发数据，这么久发不出去就当它断了
+IDLE_TIMEOUT = 60            # 普通请求的连接这么久没动静就关掉（手机一走了之时，不能让它一直占着一个线程）
+MAX_ROOMS = 3000             # 同时最多这么多个房间
+CREATE_LIMIT = (20, 600)     # 同一个地址 10 分钟内最多建 20 个房间
+CLAIM_LIMIT = (10, 60)       # 同一个地址 1 分钟内最多提交 10 次认领座位的申请
 
 TYPES = {
     '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -45,6 +56,8 @@ TYPES = {
 rooms = {}
 rooms_lock = threading.Lock()
 conns = {}                   # 房间号 -> [连接]；每个连接是 {'pid', 'q', 'last'}
+diags = {}                   # 仅开发模式：(房间号, 玩家) -> 手机上报的调试信息
+muted = {}                   # 仅开发模式：(房间号, 玩家) -> 到什么时候为止，这个人的长连接一律收不到东西
 
 
 def oops():
@@ -92,6 +105,34 @@ def sweeper():
                 oops()
 
 
+hits = {}                    # (用途, 地址) -> 最近几次的时间
+hits_lock = threading.Lock()
+
+
+def too_many(kind, addr, limit):
+    """同一个地址在一段时间内做某件事的次数超过上限了吗（顺便记一次）。"""
+    n, per = limit
+    now = time.time()
+    with hits_lock:
+        if len(hits) > 20000:                       # 别让这张表无限长
+            for k in [k for k, v in hits.items() if not v or now - v[-1] > per]:
+                del hits[k]
+        q = [t for t in hits.get((kind, addr), []) if now - t < per]
+        if len(q) >= n:
+            hits[(kind, addr)] = q
+            return True
+        q.append(now)
+        hits[(kind, addr)] = q
+        return False
+
+
+def revoke(room, pid):
+    """某人的座位被新手机认领走了：掐断他旧手机上还开着的连接，免得那边继续收到这个座位的私密信息。"""
+    for c in list(conns.get(room.code, [])):
+        if c['pid'] == pid:
+            c['drop'] = True
+
+
 def new_room():
     with rooms_lock:
         now = time.time()
@@ -99,11 +140,29 @@ def new_room():
                      if now - r.touched > ROOM_TTL and not conns.get(k)]:
             del rooms[code]
             conns.pop(code, None)
-        while True:
-            code = '%04d' % random.SystemRandom().randrange(10000)
-            if code not in rooms:
+        if len(rooms) >= MAX_ROOMS:
+            # 房间太多（多半是有人在刷）：先清掉从来没有人连上过的空房间（建了一分钟以上），
+            # 再清十分钟没人动、也没人连着的房间，最旧的先清
+            def never_used(r):
+                return now - r.created > 60 and not any(p['seen'] or p['conns'] for p in r.players.values())
+            junk = sorted((r.touched, k) for k, r in rooms.items() if not conns.get(k) and never_used(r))
+            idle = sorted((r.touched, k) for k, r in rooms.items()
+                          if now - r.touched > 600 and not conns.get(k) and not never_used(r))
+            for _, code in (junk + idle)[:len(rooms) - MAX_ROOMS + 1]:
+                del rooms[code]
+                conns.pop(code, None)
+            if len(rooms) >= MAX_ROOMS:
+                raise GameError('服务器上的房间太多了，请稍后再试')
+        rnd = random.SystemRandom()
+        code = None
+        for _ in range(100):
+            c = '%04d' % rnd.randrange(10000)
+            if c not in rooms:
+                code = c
                 break
-        room = Room(code, on_change=broadcast,
+        if code is None:                                    # 随机碰不到空号，就按顺序找一个
+            code = next('%04d' % i for i in range(10000) if '%04d' % i not in rooms)
+        room = Room(code, on_change=broadcast, on_revoke=revoke,
                     rng=FixedDeck() if os.environ.get('LRS_DECK') else None)
         rooms[code] = room
         conns[code] = []
@@ -127,6 +186,7 @@ def lan_url():
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     server_version = 'lrs'
+    timeout = IDLE_TIMEOUT
 
     def log_message(self, fmt, *args):
         pass
@@ -150,6 +210,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def fail(self, msg, status=400):
         self.send_json({'error': msg}, status)
+
+    def addr(self):
+        """对方的地址。只有确定在托管平台的代理后面（Render 会设置 RENDER 环境变量）时才看 X-Forwarded-For，
+        而且只用代理加上的最后一个（前面的可能是伪造的）；否则这个头谁都能随便填。"""
+        if os.environ.get('RENDER') or flag('LRS_PROXY'):
+            xff = [x.strip() for x in (self.headers.get('X-Forwarded-For') or '').split(',') if x.strip()]
+            if xff:
+                return xff[-1]
+        return self.client_address[0]
 
     # -------------------------------------------------------------- GET
 
@@ -199,9 +268,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def debug(self, q):
         """仅开发时可用（LRS_DEV=1），用来模拟网络故障：
-        act=stall  某个人的实时连接「假活着」sec 秒：连接不断，但什么都收不到
+        act=stall  某个人现有的实时连接「假活着」sec 秒：连接不断，但什么都收不到
+        act=mute   sec 秒内这个人的实时连接（包括新连上来的）一律收不到东西：模拟长连接根本不通的网络
         act=drop   服务器这边直接掐断某个人的实时连接
-        不给 pid 就是房主。"""
+        act=state  服务器眼里这个房间现在的样子
+        用 pid= 或 seat= 指定是谁，都不给就是房主。"""
         room = rooms.get(q.get('code', ''))
         if not room:
             return self.fail('房间不存在', 404)
@@ -214,9 +285,10 @@ class Handler(BaseHTTPRequestHandler):
                 'day': day.get('stage'), 'stalled': room.stalled,
                 'cues': [[c['id'], c['clips']] for c in room.cues], 'cue_age': round(now - room.cue_since, 1),
                 'host': room.players.get(room.host, {}).get('seat'),
-                'players': [{'seat': x['seat'], 'online': x['online'], 'conns': x['conns'],
+                'players': [{'seat': x['seat'], 'name': x['name'], 'online': x['online'], 'conns': x['conns'],
                              'quiet': round(now - x['seen'], 1), 'role': (g.get('seats') or {}).get(x['seat'], {}).get('role'),
-                             'alive': (g.get('seats') or {}).get(x['seat'], {}).get('alive')}
+                             'alive': (g.get('seats') or {}).get(x['seat'], {}).get('alive'),
+                             'diag': diags.get((room.code, x['id']))}
                             for x in sorted(room.players.values(), key=lambda x: x['seat'])],
                 'conns': len(conns.get(room.code, [])), 'threads': threading.active_count()})
         pid = q.get('pid') or room.host
@@ -230,8 +302,10 @@ class Handler(BaseHTTPRequestHandler):
             hit += 1
             if q.get('act') == 'drop':
                 c['drop'] = True
-            else:
+            elif q.get('act') == 'stall':
                 c['stall'] = time.time() + float(q.get('sec') or 30)
+        if q.get('act') == 'mute':
+            muted[(room.code, pid)] = time.time() + float(q.get('sec') or 30)
         self.send_json({'ok': True, 'conns': hit})
 
     def static(self, path):
@@ -273,9 +347,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
         self.connection.settimeout(WRITE_TIMEOUT)     # 对面收不动了就别一直等
-        c = {'pid': p['id'], 'q': queue.Queue(), 'last': None}
+        c = {'pid': p['id'], 'q': queue.Queue(), 'last': None, 'hb': q.get('hb') == '1'}
         conns[room.code].append(c)
-        room.attach(p['id'], hb=q.get('hb') == '1')   # 这里会把当前画面推给刚连上的这条连接
+        room.attach(p['id'], hb=c['hb'])              # 这里会把当前画面推给刚连上的这条连接
         try:
             # 开头垫一段空白：有些代理和内置浏览器要攒够一定字节才肯往下传
             self.wfile.write(b'retry: 1500\n:' + b' ' * 2048 + b'\n\n')
@@ -286,7 +360,7 @@ class Handler(BaseHTTPRequestHandler):
                     msg = c['q'].get(timeout=max(0.05, min(1.0, next_ping - time.time())))
                 except queue.Empty:
                     msg = None
-                stalled = c.get('stall', 0) > time.time()
+                stalled = max(c.get('stall', 0), muted.get((room.code, c['pid']), 0)) > time.time()
                 if msg is not None and not stalled:
                     self.wfile.write(b'data: ' + msg.encode('utf-8') + b'\n\n')
                     self.wfile.flush()
@@ -303,7 +377,7 @@ class Handler(BaseHTTPRequestHandler):
                 conns[room.code].remove(c)
             except (KeyError, ValueError):
                 pass
-            room.detach(p['id'])
+            room.detach(p['id'], hb=c['hb'])
 
     # -------------------------------------------------------------- POST
 
@@ -322,16 +396,20 @@ class Handler(BaseHTTPRequestHandler):
     def post(self):
         try:
             length = int(self.headers.get('Content-Length') or 0)
-            if length > 65536:
+            if length > 65536 or length < 0:
+                self.close_connection = True                # 请求体没读，这条连接不能再用，否则剩下的字节会被当成下一个请求
                 return self.fail('请求太大', 413)
             body = json.loads(self.rfile.read(length).decode('utf-8') or '{}')
             if not isinstance(body, dict):
                 raise ValueError
         except (ValueError, UnicodeDecodeError):
+            self.close_connection = True
             return self.fail('请求格式不对')
         path = urlparse(self.path).path
         try:
             if path == '/api/create':
+                if too_many('create', self.addr(), CREATE_LIMIT):
+                    return self.fail('建房间太频繁了，请稍后再试', 429)
                 room = new_room()
                 p = room.add_player(body.get('name'))
                 if isinstance(body.get('roles'), dict):
@@ -343,19 +421,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self.fail('房间不存在，请确认房间号', 404)
 
             if path == '/api/join':
+                # 在锁里只把要回的内容算好，发出去放到锁外面：对面不收数据时，不能连累整个房间都卡住
                 with room.lock:
                     p = room.auth(body.get('pid'), body.get('token'))
                     if p:                                   # 老玩家回来了
-                        return self.send_json(self.cred(room, p))
-                    if room.phase == 'lobby':
-                        p = room.add_player(body.get('name'))
-                        return self.send_json(self.cred(room, p))
-                    # 游戏已经开始：只能认领掉线的座位
-                    return self.send_json({'claim': room.offline_seats(), 'code': room.code})
+                        out = self.cred(room, p)
+                    elif room.phase == 'lobby':
+                        out = self.cred(room, room.add_player(body.get('name')))
+                    else:                                   # 游戏已经开始：只能申请认领掉线的座位
+                        out = {'claim': room.offline_seats(), 'code': room.code}
+                return self.send_json(out)
 
             if path == '/api/claim':
-                p = room.claim(body.get('seat'), body.get('name'))
-                return self.send_json(self.cred(room, p))
+                # 第一次：提交申请，等房主同意；之后带着申请编号来问结果，同意了就拿到这个座位的身份
+                if body.get('rid'):
+                    if body.get('cancel'):                  # 撤回；要是房主已经同意了，就照样把身份交给他
+                        state, p = room.cancel_claim(body.get('rid'))
+                    else:
+                        state, p = room.claim_status(body.get('rid'))
+                    if state == 'ok' and p:
+                        return self.send_json(self.cred(room, p))
+                    return self.send_json({'rid': body.get('rid'), 'state': state})
+                if too_many('claim', self.addr(), CLAIM_LIMIT):
+                    return self.fail('申请太频繁了，请稍后再试', 429)
+                rid = room.request_claim(body.get('seat'), body.get('name'))
+                return self.send_json({'rid': rid, 'state': 'wait'})
 
             if path in ('/api/act', '/api/beat'):
                 p = room.auth(body.get('pid'), body.get('token'))
@@ -363,6 +453,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.fail('身份已失效，请重新进入房间', 403)
                 if path == '/api/beat':                     # 手机回应心跳：我还醒着
                     room.touch(p['id'])
+                    if DEV and isinstance(body.get('d'), dict):
+                        diags[(room.code, p['id'])] = dict(list(body['d'].items())[:12], at=round(time.time(), 1))
                 else:
                     room.action(p['id'], body.get('type'), body.get('data'))
                 return self.send_json({'ok': True})
@@ -379,10 +471,24 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 128
 
+    def handle_error(self, request, client_address):
+        # 手机中途断开（锁屏、关页面、换网络）是家常便饭，不值得在日志里打一大段报错
+        if isinstance(sys.exc_info()[1], (ConnectionError, socket.timeout, TimeoutError)):
+            return
+        ThreadingHTTPServer.handle_error(self, request, client_address)
+
 
 def start(port=None):
     """启动服务器和后台检查线程，返回服务器对象（测试里也用它）。"""
-    if os.environ.get('LRS_FAST'):          # 仅供压力测试：把夜里的停顿和「假装操作」缩短到十分之一
+    try:                                    # 每台手机要占好几个连接；macOS 默认只给 256 个文件句柄，不够
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = 8192 if hard == resource.RLIM_INFINITY else min(8192, hard)
+        if soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except (ImportError, ValueError, OSError):
+        pass
+    if flag('LRS_FAST'):                    # 仅供压力测试：把夜里的停顿和「假装操作」缩短到十分之一
         game.PAUSE_AFTER_NIGHT_FALL, game.PAUSE_BETWEEN_ROLES = 0.3, 0.2
         game.FAKE_ACT = {k: (lo / 10, hi / 10) for k, (lo, hi) in game.FAKE_ACT.items()}
         game.FAKE_DEFAULT = (0.6, 1.1)

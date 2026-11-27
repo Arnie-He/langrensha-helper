@@ -45,18 +45,29 @@ def post(path, body):
 class Bot(threading.Thread):
     """一个模拟玩家。
 
-    host=True   同时扮演房主：「播放」语音（按片段数等一小会儿再回报播完）、点各种推进流程的按钮
-    flaky=秒    平均每隔这么久掉一次线：有时是连接断开过一会儿再连，有时是页面被冻住（连接还在但不回应心跳）
+    host=True     轮到它当房主时会干房主的活：「播放」语音（按片段数等一小会儿再回报播完）、点各种推进流程的按钮
+    flaky=秒      平均每隔这么久掉一次线：有时是连接断开过一会儿再连，有时是页面被冻住（连接还在但不回应心跳）
+    takeover=True 房主掉线或者播报停了，过几秒它会点「用我的手机播报」接手
+    poll=True     不用长连接，每隔一秒半主动取一次画面（模拟长连接不通的网络）
+    relogin=概率  每次掉线后有这么大的可能「手机丢了」：原来的身份作废，用房间号重新进来认领自己的座位
     """
 
-    def __init__(self, code, name, delay, cred=None, host=False, flaky=0, clip=0.15):
+    def __init__(self, code, name, delay, cred=None, host=False, flaky=0, clip=0.15,
+                 takeover=False, poll=False, relogin=0.0):
         threading.Thread.__init__(self)
         self.daemon = True
         self.name_ = name
         self.delay = delay
-        self.host = host
+        self.host = host or takeover
         self.flaky = flaky
         self.clip = clip
+        self.takeover = takeover
+        self.poll = poll
+        self.relogin = relogin
+        self.bad_since = 0              # 从什么时候开始发现播报不对劲
+        self.takeovers = 0
+        self.claims = 0
+        self.viewed = 0.0               # 最近一次收到画面的时间
         self.cred = cred or post('/api/join', {'code': code, 'name': name})
         if 'pid' not in self.cred:
             raise SystemExit('进不了房间：%s' % self.cred)
@@ -82,40 +93,89 @@ class Bot(threading.Thread):
     # ------------------------------------------------------------ 连接
 
     def run(self):
-        for fn in [self.work] + ([self.tick] if self.host else []):
+        for fn in (self.work, self.tick):
             t = threading.Thread(target=fn)
             t.daemon = True
             t.start()
-        url = '%s/api/events?hb=1&code=%s&pid=%s&token=%s' % (
-            BASE, self.cred['code'], self.cred['pid'], self.cred['token'])
         while not self.quit:
             try:
-                with urllib.request.urlopen(url, timeout=30) as r:
-                    until = None
-                    ev = ''
-                    for raw in r:
-                        line = raw.decode('utf-8').rstrip('\n')
-                        if line.startswith('event: '):
-                            ev = line[7:]
-                        elif line.startswith('data: '):
-                            if ev == 'ping':
-                                self.beat()
-                            else:
-                                self.on_view(json.loads(line[6:]))
-                            ev = ''
-                        # 只在游戏进行中掉线：大厅里要全员在线才能发牌，那时大家本来也都盯着手机
-                        if self.flaky and until is None and self.last and self.last['phase'] in ('night', 'day'):
-                            until = time.time() + random.expovariate(1.0 / self.flaky)
-                        if self.quit or (until and time.time() > until):
-                            break
-                    if until and not self.quit and random.random() < 0.3:
-                        time.sleep(random.uniform(18, 24))      # 页面被冻住：连接没断，但不读也不回应心跳
+                if self.poll:
+                    self.polling()
+                else:
+                    self.stream()
             except Exception:           # 连接断了、服务器重启了：等一下再连
                 pass
             if self.quit:
                 break
             self.drops += 1
             time.sleep(random.choice(AWAY) if self.flaky else 1.0)
+            if self.flaky and random.random() < self.relogin:
+                self.lose_phone()
+
+    def qs(self):
+        return 'code=%s&pid=%s&token=%s' % (self.cred['code'], self.cred['pid'], self.cred['token'])
+
+    def due(self, until):
+        """该掉线了吗。只在游戏进行中掉线：大厅里要全员在线才能发牌，那时大家本来也都盯着手机。"""
+        if self.flaky and until is None and self.last and self.last['phase'] in ('night', 'day'):
+            until = time.time() + random.expovariate(1.0 / self.flaky)
+        return until, self.quit or bool(until and time.time() > until)
+
+    def stream(self):
+        with urllib.request.urlopen('%s/api/events?hb=1&%s' % (BASE, self.qs()), timeout=30) as r:
+            until, ev = None, ''
+            for raw in r:
+                line = raw.decode('utf-8').rstrip('\n')
+                if line.startswith('event: '):
+                    ev = line[7:]
+                elif line.startswith('data: '):
+                    if ev == 'ping':
+                        self.beat()
+                    else:
+                        self.on_view(json.loads(line[6:]))
+                    ev = ''
+                until, stop = self.due(until)
+                if stop:
+                    break
+            if until and not self.quit and random.random() < 0.3:
+                time.sleep(random.uniform(18, 24))      # 页面被冻住：连接没断，但不读也不回应心跳
+
+    def polling(self):
+        until = None
+        while True:
+            with urllib.request.urlopen('%s/api/view?%s' % (BASE, self.qs()), timeout=10) as r:
+                self.on_view(json.loads(r.read().decode('utf-8')))
+            until, stop = self.due(until)
+            if stop:
+                return
+            time.sleep(1.5)
+
+    def lose_phone(self):
+        """手机丢了 / 换了浏览器：等座位显示掉线以后，用房间号重新进来，认领自己原来的座位。"""
+        v = self.last or {}
+        seat = (v.get('you') or {}).get('seat')
+        if not seat or v.get('phase') not in ('night', 'day'):
+            return
+        for _ in range(15):
+            if self.quit:
+                return
+            time.sleep(2)
+            j = post('/api/join', {'code': self.cred['code'], 'name': self.name_})
+            if 'pid' in j or 'claim' not in j:      # 房间已经回到大厅或者没了：不是这里要测的情况
+                return
+            if any(x['seat'] == seat for x in j['claim']):
+                r = post('/api/claim', {'code': self.cred['code'], 'seat': seat, 'name': self.name_})
+                for _ in range(60):                     # 等房主同意
+                    if self.quit or not r.get('rid'):
+                        break
+                    time.sleep(1)
+                    c = post('/api/claim', {'code': self.cred['code'], 'rid': r['rid']})
+                    if 'pid' in c:
+                        self.cred = c
+                        self.claims += 1
+                        return
+                    if c.get('state') != 'wait':
+                        break
 
     def on_view(self, v):
         """收到新画面：只记下来。真正的操作在 work 里做，那边永远只看最新的一份（和真手机一样）。"""
@@ -123,6 +183,7 @@ class Bot(threading.Thread):
             self.done.clear()           # 新的一局：上一局做过的事不算数了
             self.wait.clear()
         self.last = v
+        self.viewed = time.time()
         sig = self.progress(v)
         if sig != self.sig:
             self.sig = sig
@@ -173,7 +234,7 @@ class Bot(threading.Thread):
     def handle(self, v):
         me = v['you']
         ph = v['phase']
-        if self.host:
+        if self.host and me.get('host'):
             self.speak(v)
         if ph == 'lobby':
             if not me['seat']:
@@ -257,17 +318,36 @@ class Bot(threading.Thread):
                 return
 
     def tick(self):
-        """房主每半秒看一眼现在该点什么。"""
+        """每半秒看一眼：我是房主的话现在该点什么；不是的话播报是不是停了、要不要接手。"""
         while not self.quit:
             time.sleep(0.5)
             v = self.last
-            if not v or not v['you'].get('host'):
+            if not v:
                 continue
             try:
-                self.duty(v)
+                for c in v.get('claims') or []:         # 有人换了手机要回到座位：真人房主会当面确认一下，机器人直接同意
+                    self.act('claim_ok', rid=c['rid'])
+                if v['you'].get('host'):
+                    self.bad_since = 0
+                    if self.host:
+                        self.duty(v)
+                elif self.takeover:
+                    self.rescue(v)
             except Exception as e:
                 self.errors.append(repr(e))
-                print('[房主] 出错：%r' % e)
+                print('[%s] 出错：%r' % (self.name_, e))
+
+    def rescue(self, v):
+        """房主掉线了，或者播报停了：等几秒还没好，就点「用我的手机播报」（每个人等的时间不一样长）。"""
+        if v.get('host_online') and not v.get('stalled'):
+            self.bad_since = 0
+            return
+        if not self.bad_since:
+            self.bad_since = time.time() + random.uniform(0, 4)
+        elif time.time() - self.bad_since > 3:
+            self.bad_since = 0
+            if self.act('take_host').get('ok'):
+                self.takeovers += 1
 
     def duty(self, v):
         ph = v['phase']

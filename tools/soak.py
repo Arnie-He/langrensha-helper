@@ -14,6 +14,9 @@
     --board=     板子：预设的编号（p12a ...），或者 15（15 人 通灵师女巫猎人守卫骑士 + 狼王机械狼，默认）
     --flaky=     每个玩家平均多少秒掉一次线（0 = 不掉线）
     --flaky-host 房主的手机也会掉线
+    --takeover   房主掉线或播报停了的时候，其他人会接手播报
+    --poll=      有几个人不用长连接、只靠定时取画面（模拟长连接不通的网络）
+    --relogin=   每次掉线后「手机丢了、重新进来认领座位」的概率（比如 0.1）
     --games=     连打几局
 
 任何一局超过 --stall 秒（默认 120）没有任何进展，就打印当时的状态并以失败退出。
@@ -48,24 +51,32 @@ def main():
     roles = BOARD15 if board == '15' else next(p['roles'] for p in PRESETS if p['id'] == board)
     n = sum(roles.values())
 
+    takeover = '--takeover' in sys.argv
+    polls = int(opt('poll', '0'))
+    relogin = float(opt('relogin', '0'))
+
     cred = bots.post('/api/create', {'name': '房主', 'roles': roles})
     if 'pid' not in cred:
         raise SystemExit('建不了房间：%s' % cred)
-    host = bots.Bot(cred['code'], '房主', 0.3, cred=cred, host=True,
+    host = bots.Bot(cred['code'], '房主', 0.3, cred=cred, host=True, takeover=takeover,
                     flaky=flaky if '--flaky-host' in sys.argv else 0)
     host.start()
     crew = [host]
     for i in range(1, n):
-        b = bots.Bot(cred['code'], bots.NAMES[i % len(bots.NAMES)] + str(i), 0.3, flaky=flaky)
+        b = bots.Bot(cred['code'], bots.NAMES[i % len(bots.NAMES)] + str(i), 0.3, flaky=flaky,
+                     takeover=takeover, poll=i <= polls, relogin=relogin)
         b.start()
         crew.append(b)
         time.sleep(0.05)
-    print('房间 %s：%d 人，%s，掉线间隔 %s 秒' % (cred['code'], n, board, flaky or '不掉线'))
+    print('房间 %s：%d 人，%s，掉线间隔 %s 秒%s%s%s' % (
+        cred['code'], n, board, flaky or '不掉线', '，会换人播报' if takeover else '',
+        '，%d 人只轮询' % polls if polls else '', '，丢手机概率 %s' % relogin if relogin else ''))
 
     played, t0, last_phase = 0, time.time(), None
     while played < games:
         time.sleep(0.5)
-        v = host.last
+        fresh = max(crew, key=lambda b: b.viewed)        # 画面最新的那台手机
+        v = fresh.last
         if not v:
             continue
         now = '%s %s' % (v['phase'], v.get('night_no') or '')
@@ -75,16 +86,21 @@ def main():
         if v['phase'] == 'over':
             played += 1
             o = v['over']
-            print('第 %d 局结束：%s 获胜，%d 夜，用时 %.0f 秒，全场掉线 %d 次'
-                  % (played, o['winner'], v['night_no'], time.time() - t0, sum(b.drops for b in crew)))
+            print('第 %d 局结束：%s 获胜，%d 夜，用时 %.0f 秒，累计掉线 %d 次，换人播报 %d 次，重新认领座位 %d 次'
+                  % (played, o['winner'], v['night_no'], time.time() - t0, sum(b.drops for b in crew),
+                     sum(b.takeovers for b in crew), sum(b.claims for b in crew)))
             t0 = time.time()
             if played < games:
                 time.sleep(1)
-                host.act('again')
-                host.moved = time.time()
+                for _ in range(40):                       # 现在谁是房主谁来开下一局（房主可能刚好掉线，等一等）
+                    if any(b.act('again').get('ok') for b in crew):
+                        break
+                    time.sleep(1)
+                for b in crew:
+                    b.moved = time.time()
                 time.sleep(1)
             continue
-        quiet = time.time() - host.moved
+        quiet = min(time.time() - b.moved for b in crew)
         if time.time() - t0 > 900:
             quiet, stall = time.time() - t0, 0            # 一局打了一刻钟还没完，也算卡住
         if quiet > stall:

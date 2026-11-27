@@ -39,6 +39,10 @@ FAKE_DEFAULT = (6.0, 11.0)
 OFFLINE_GRACE = 6.0          # 连接断开后，这么久还没连回来才算掉线
 ALIVE_FOR = 16.0             # 连接还在，但这么久没有回应心跳（页面被系统冻结了），也算掉线
 CUE_STALL = 25.0             # 一条语音排到队首这么久还没播完，就认为房主手机的播报卡住了
+GHOST_AFTER = 60.0           # 进了房间却一直没连上来、也没入座的人，在大厅名单里留这么久就清掉
+CLAIM_TTL = 300.0            # 「换手机回到座位」的申请，房主这么久没处理就作废
+CLAIM_HOLD = 1800.0          # 批准以后，申请人的手机这么久之内拿起来都能直接进去（中途锁了屏也不怕）
+CLAIM_KEEP = 64              # 最多记着多少条申请（含处理完的）。有人不停地申请又撤回时，先扔掉最早处理完的
 
 # 只有这些死法可以发动猎人 / 狼王的枪
 GUN_OK = ('wolf', 'vote', 'shot', 'take', 'hunt')
@@ -86,14 +90,21 @@ def _default_later(sec, fn):
 
 
 class Room(object):
-    def __init__(self, code, later=None, rng=None, on_change=None):
+    def __init__(self, code, later=None, rng=None, on_change=None, on_revoke=None):
         self.code = code
         self.lock = threading.RLock()
         self._later = later or _default_later
         self.rng = rng or random.SystemRandom()
         self.on_change = on_change or (lambda room: None)
+        # 某人的身份作废了（座位被新手机认领走）：服务器据此掐断他旧手机上还开着的连接
+        self.on_revoke = on_revoke or (lambda room, pid: None)
+        self.claims = {}              # 换手机回到座位的申请 {编号: {...}}，要房主同意
+        self.sits = 0                 # 坐下的次数，给每次入座一个编号
         self.players = {}
         self.host = None
+        # 发牌时的房主。换手机回到座位的申请由他批准：中途接手播报的人只能批准他本人回来，
+        # 免得有人先接手播报、再用另一台手机认领别人的座位、自己批准自己，看到别人的身份
+        self.owner = None
         self.phase = 'lobby'          # lobby -> deal -> night <-> day -> over
         self.config = default_config()
         self.g = None                 # 一局游戏的全部状态
@@ -103,6 +114,7 @@ class Room(object):
         self.stalled = False          # 播报卡住了（见 sweep），这时别人可以接手播报
         self.epoch = 0                # 每次回到大厅 +1，让旧的定时器失效
         self.touched = time.time()
+        self.created = self.touched
 
     # ================================================================== 基础设施
 
@@ -125,6 +137,7 @@ class Room(object):
         self.cue_seq += 1
         if not self.cues:
             self.cue_since = time.time()
+            self.stalled = False                       # 新的一句刚排上来，谈不上卡住
         self.cues.append({'id': self.cue_seq, 'clips': list(clips), 'gate': gate})
 
     def when_quiet(self, fn):
@@ -164,14 +177,14 @@ class Room(object):
         return {p['seat']: p for p in self.players.values() if p['seat']}
 
     def add_player(self, name):
-        # online 是别人看到的「在线 / 掉线」；conns 是这台手机现在有几条实时连接；
-        # seen 是最后一次有动静（连上来、回应心跳、轮询）的时间；hb 表示这台手机会回应心跳
+        # online 是别人看到的「在线 / 掉线」；conns 是这台手机现在有几条实时连接，其中 hbc 条会回应心跳；
+        # seen 是最后一次有动静（连上来、回应心跳、轮询）的时间
         p = {'id': secrets.token_hex(4), 'token': secrets.token_hex(12),
-             'name': clean_name(name), 'seat': 0,
-             'online': False, 'conns': 0, 'seen': 0.0, 'left': 0.0, 'hb': False}
+             'name': clean_name(name), 'seat': 0, 'born': time.time(),
+             'online': False, 'conns': 0, 'hbc': 0, 'seen': 0.0, 'left': 0.0}
         self.players[p['id']] = p
         if self.host is None:
-            self.host = p['id']
+            self.host = self.owner = p['id']
         return p
 
     def auth(self, pid, token):
@@ -186,20 +199,24 @@ class Room(object):
             p = self.players.get(pid)
             if p:
                 p['conns'] += 1
-                p['hb'] = bool(hb)
+                if hb:
+                    p['hbc'] += 1
                 p['seen'] = time.time() if now is None else now
                 p['online'] = True
                 self.touched = time.time()
                 self.changed()
 
-    def detach(self, pid, now=None):
-        """一条实时连接断了。先不算掉线：多半几秒内就会连回来，真没回来由 sweep 标记。"""
+    def detach(self, pid, hb=False, now=None):
+        """一条实时连接断了（hb 要和它连上来时说的一样）。先不算掉线：多半几秒内就会连回来，真没回来由 sweep 标记。"""
         with self.lock:
             p = self.players.get(pid)
             if not p:
                 return
             p['conns'] = max(0, p['conns'] - 1)
+            if hb:
+                p['hbc'] = max(0, p['hbc'] - 1)
             if not p['conns']:
+                p['hbc'] = 0
                 p['left'] = time.time() if now is None else now
 
     def touch(self, pid, now=None):
@@ -225,9 +242,16 @@ class Room(object):
             dirty = False
             for pid, p in list(self.players.items()):
                 if not p['online']:
+                    # 页面没开成的人（进了房间但从来没连上来）：不清的话大厅名单只增不减
+                    if (self.phase == 'lobby' and not p['seat'] and not p['conns'] and pid != self.host
+                            and now - max(p['seen'], p['left'], p['born']) > GHOST_AFTER):
+                        del self.players[pid]
+                        dirty = True
                     continue
                 if p['conns']:
-                    gone = p['hb'] and now - p['seen'] > ALIVE_FOR
+                    # 只有当这个人所有的连接都会回应心跳时，才能凭「没回应」判断页面被冻住了；
+                    # 只要有一条是不回应心跳的老页面 / 脚本，就只能看连接本身
+                    gone = p['hbc'] >= p['conns'] and now - p['seen'] > ALIVE_FOR
                 else:
                     gone = now - max(p['seen'], p['left']) > OFFLINE_GRACE
                 if not gone:
@@ -237,6 +261,8 @@ class Room(object):
                 # 大厅里没入座又掉线的人直接清掉，免得名单越来越长
                 if self.phase == 'lobby' and not p['seat'] and pid != self.host:
                     del self.players[pid]
+            if self._expire_claims(now):               # 没人处理的申请过期了：房主那边的横幅收起来
+                dirty = True
             # 一句话里报的号码越多（比如报一长串上警的人），允许的时间越长
             stalled = bool(self.cues) and now - self.cue_since > CUE_STALL + 1.5 * len(self.cues[0]['clips'])
             if stalled != self.stalled:
@@ -251,19 +277,114 @@ class Room(object):
                 for p in sorted(self.players.values(), key=lambda x: x['seat'])
                 if p['seat'] and not p['online']]
 
-    def claim(self, seat, name):
-        """换了手机或浏览器的人，重新认领自己掉线的座位。"""
+    # 换了手机或浏览器的人，用房间号重新进来认领自己原来的座位。
+    # 认领必须经房主同意：否则只要知道房间号，谁都能趁别人锁屏的时候顶掉他的座位、看到他的身份。
+
+    def _expire_claims(self, now):
+        """清掉过期的申请；记录太多时再扔掉最早处理完的。返回房主那边的横幅是否因此少了。"""
+        gone = [r for r, c in self.claims.items() if now - c['at'] > (CLAIM_HOLD if c['state'] == 'ok' else CLAIM_TTL)]
+        live = any(self.claims[r]['state'] == 'wait' for r in gone)
+        for rid in gone:
+            del self.claims[rid]
+        extra = len(self.claims) - CLAIM_KEEP
+        if extra > 0:
+            done = sorted((c for c in self.claims.values() if c['state'] == 'no'), key=lambda c: c['at'])
+            for c in done[:extra]:
+                del self.claims[c['rid']]
+        return live
+
+    def _may_approve(self, p, c):
+        """p 能不能处理这个申请：发牌时的房主可以；接手播报的人只能处理原来房主本人的申请，
+        除非原来的房主没有座位（换不了手机回来），那就由现在播报的人处理。"""
+        if p['id'] == self.owner:
+            return True
+        if p['id'] != self.host:
+            return False
+        owner = self.players.get(self.owner)
+        return not owner or not owner['seat'] or c['pid'] == owner['id']
+
+    def _claim_live(self, c):
+        """这个申请还有效吗：还在等房主，而且座位的主人仍然不在线。"""
+        q = self.players.get(c['pid'])
+        if c['state'] == 'wait' and (not q or q['seat'] != c['seat'] or q['online']):
+            c['state'] = 'no'                          # 原来的手机回来了 / 座位变了：作废
+        return c['state'] == 'wait'
+
+    def request_claim(self, seat, name, now=None):
+        """申请认领一个掉线的座位，返回申请编号。"""
         with self.lock:
+            now = time.time() if now is None else now
+            if self.phase == 'lobby':
+                raise GameError('还没发牌，直接选座位就行')
             p = self.seat_map().get(_int(seat))
             if not p:
                 raise GameError('没有这个座位')
             if p['online']:
                 raise GameError('这个座位的玩家还在线')
-            p['token'] = secrets.token_hex(12)
-            if name:
-                p['name'] = clean_name(name)
+            self._expire_claims(now)
+            # 同一个座位只留最新的一个申请：房主那边每个座位最多一条横幅，
+            # 一个座位上的重复申请也挤不掉别的座位的申请
+            for c in self.claims.values():
+                if c['seat'] == p['seat'] and c['state'] == 'wait':
+                    c['state'] = 'no'
+            rid = secrets.token_hex(8)
+            self.claims[rid] = {'rid': rid, 'seat': p['seat'], 'pid': p['id'], 'at': now, 'state': 'wait',
+                                'token': None, 'name': clean_name(name) if name and str(name).strip() else ''}
             self.changed()
-            return p
+            return rid
+
+    def claim_status(self, rid, now=None):
+        """申请的结果：('wait' | 'ok' | 'no' | 'gone', 同意后是那个座位的玩家)。"""
+        with self.lock:
+            self._expire_claims(time.time() if now is None else now)
+            c = self.claims.get(str(rid or ''))
+            if not c:
+                return 'gone', None
+            if c['state'] == 'ok':
+                # 只交出这次批准时发的那个身份：之后座位又被别人认领过，这个编号就不再管用
+                q = self.players.get(c['pid'])
+                if q and q['token'] == c['token']:
+                    return 'ok', q
+                return 'gone', None
+            self._claim_live(c)
+            return c['state'], None
+
+    def cancel_claim(self, rid):
+        """申请人自己取消了申请。已经批准了的取消不了，返回和 claim_status 一样的结果。"""
+        with self.lock:
+            c = self.claims.get(str(rid or ''))
+            if c and c['state'] == 'wait':
+                c['state'] = 'no'
+                self.changed()
+        return self.claim_status(rid)
+
+    def _claim_for(self, p, data):
+        if p['id'] not in (self.host, self.owner):
+            raise GameError('只有房主可以这样做')
+        self._expire_claims(time.time())               # 横幅挂太久、申请人多半早走了的，不再生效
+        c = self.claims.get(str(data.get('rid') or ''))
+        if not c or not self._claim_live(c):
+            raise GameError('这个申请已经失效了')
+        if not self._may_approve(p, c):
+            raise GameError('要等房主（%d 号）用手机回来才能处理' % self.players[self.owner]['seat'])
+        return c
+
+    def a_claim_ok(self, p, data):
+        c = self._claim_for(p, data)
+        q = self.players[c['pid']]
+        q['token'] = secrets.token_hex(12)             # 旧手机上的身份从此作废
+        if c['name']:
+            q['name'] = c['name']
+        c['state'] = 'ok'
+        c['token'] = q['token']
+        c['at'] = time.time()                          # 从批准时重新计时（CLAIM_HOLD），给申请人留足时间来取
+        for o in self.claims.values():                 # 同一个座位的其他申请一并作废
+            if o is not c and o['seat'] == c['seat'] and o['state'] == 'wait':
+                o['state'] = 'no'
+        self.on_revoke(self, q['id'])
+
+    def a_claim_no(self, p, data):
+        self._claim_for(p, data)['state'] = 'no'
 
     # ================================================================== 操作入口
 
@@ -316,6 +437,9 @@ class Room(object):
         other = self.seat_map().get(seat)
         if other and other is not p:
             raise GameError('%d号已经有人坐了' % seat)
+        if p['seat'] != seat:
+            self.sits += 1
+            p['sat'] = self.sits                       # 每次有人坐下都换一个编号，「请离座」靠它认人
         p['seat'] = seat
 
     def a_stand(self, p, data):
@@ -328,6 +452,10 @@ class Room(object):
         if self.phase != 'lobby':
             raise GameError('游戏已经开始')
         other = self.seat_map().get(_int(data.get('seat')))
+        # 弹出确认框以后，原来的人走了、别人坐了上来（名字可能一样，都叫「玩家」）
+        if other and ((data.get('sat') is not None and other.get('sat') != _int(data.get('sat')))
+                      or (data.get('name') is not None and other['name'] != data.get('name'))):
+            raise GameError('这个座位已经换人了')
         if other:
             other['seat'] = 0
             if not other['online'] and other['id'] != self.host:
@@ -362,7 +490,7 @@ class Room(object):
     def a_take_host(self, p, data):
         """换一台手机来播报：只有房主掉线了，或者播报卡住了才可以。"""
         host = self.players.get(self.host)
-        if host and host['online'] and not self.stalled:
+        if host and host['online'] and not (self.stalled and self.cues):
             raise GameError('房主还在线')
         self.host = p['id']
         self.stalled = False
@@ -379,6 +507,7 @@ class Room(object):
         self._need_host(p)
         if self.phase != 'lobby':
             raise GameError('已经发过牌了')
+        self.owner = p['id']                            # 只在大厅里真正发牌时才换；游戏中途点发牌不算
         err = validate_config(self.config)
         if err:
             raise GameError(err)
@@ -439,7 +568,11 @@ class Room(object):
 
     def _to_lobby(self):
         self.epoch += 1
+        for c in self.claims.values():                 # 回到大厅以后直接选座位就行，还没处理的申请作废
+            if c['state'] == 'wait':
+                c['state'] = 'no'
         self.cues = []
+        self.stalled = False
         self.g = None
         self.phase = 'lobby'
 
@@ -481,6 +614,10 @@ class Room(object):
         }
         clips = ['night_fall'] + (['seal'] if g['night']['sealed'] else [])
         self.cue(clips, lambda: self.later(PAUSE_AFTER_NIGHT_FALL, self._next_step))
+
+    def _skip_key(self):
+        """当前夜间环节的编号。房主点「跳过」时带上它，免得跳过的是确认框打开之后才轮到的角色。"""
+        return '%d-%d' % (self.g['night_no'], self.g['night']['idx'])
 
     def _step(self):
         nt = self.g['night']
@@ -862,11 +999,14 @@ class Room(object):
     def _set_kill(self, agreed):
         g = self.g
         nt = g['night']
+        extra = nt['extra']
+        if not agreed and extra and g['mech'] and g['mech']['double']:
+            # 第一刀空着、只用了「第二刀」：其实就是普通的一刀。女巫照样看得到刀口、可以救，双刀也不算用掉
+            agreed, extra = extra, 0
         nt['kill'] = agreed
         nt['main'] = self._rt(agreed) if agreed else 0
         nt['kills'] = [nt['main']] if agreed else []
         nt['log'].append('狼人击杀 %d号' % agreed if agreed else '狼人空刀')
-        extra = nt['extra']
         if extra and g['mech'] and g['mech']['double']:
             e = self._rt(extra)
             if e == nt['main']:
@@ -925,6 +1065,8 @@ class Room(object):
         self._need_host(p)
         if self.phase != 'night' or self.g['night']['sub'] != 'act':
             raise GameError('现在没有可以跳过的环节')
+        if data.get('key') is not None and data.get('key') != self._skip_key():
+            raise GameError('那个环节已经结束了')           # 确认框打开以后，流程已经走到下一个角色
         nt = self.g['night']
         if self._step() == 'wolf' and not nt['no_kill']:
             picks = [nt['picks'][w] for w in self._holders() if w in nt['picks']]
@@ -1464,9 +1606,15 @@ class Room(object):
         self._need_host(p)
         d = self._need_stage('settle')
         seated = self.seat_map()
+        # 只处理房主点「不等了」时屏幕上那几个人。就在这一两秒里刚被猎人带走、刚轮到的人，
+        # 还没来得及看手机，不能替他决定不开枪、撕警徽
+        saw = data.get('seats')
+        saw = None if not isinstance(saw, list) else set(_int(x) for x in saw)
         for seat in sorted(d['settle']['pending']):
             if self.g['day']['stage'] != 'settle' or not self.g['day']['settle']:
                 break
+            if saw is not None and seat not in saw:
+                continue
             self.a_settle(seated[seat], {'target': 0, 'badge': 0})
 
     def _end_settle(self):
@@ -1482,6 +1630,17 @@ class Room(object):
             self._begin_dusk(([d['exiled']] if d['exiled'] else []) + words)
         elif then == 'resume':
             d['stage'] = 'discuss'                     # 骑士决斗失败，继续白天
+            if d['order_opts']:
+                # 警长还没选发言顺序就出局了（骑士警长决斗失败）：按现在的警长重新问一遍，没有警长就随机
+                sh = g['sheriff']
+                if sh and g['seats'][sh]['alive']:
+                    d['order_opts'] = [{'start': self._next_alive(sh, 1), 'dir': 1},
+                                       {'start': self._next_alive(sh, -1), 'dir': -1}]
+                    self.cue(['order_ask'])
+                else:
+                    d['order_opts'] = None
+                    d['speak'] = {'start': self.rng.choice(self._alive()), 'dir': self.rng.choice([1, -1])}
+                    self.cue(['discuss'])
         else:
             d['stage'] = 'wait'
             d['feed'].append('直接进入黑夜')
@@ -1510,7 +1669,7 @@ class Room(object):
     def a_order(self, p, data):
         d = self._need_stage('discuss')
         g = self.g
-        if p['seat'] != g['sheriff'] or not d['order_opts']:
+        if not p['seat'] or p['seat'] != g['sheriff'] or not d['order_opts']:
             raise GameError('只有警长可以决定发言顺序')
         i = _int(data.get('i'))
         if i not in (0, 1):
@@ -1760,6 +1919,7 @@ class Room(object):
             st = g['seats'].get(s) if g else None
             v['seats'].append({
                 'seat': s,
+                'sat': pl.get('sat', 0) if pl else 0,
                 'name': pl['name'] if pl else '',
                 'taken': bool(pl),
                 'online': bool(pl and pl['online']),
@@ -1769,9 +1929,15 @@ class Room(object):
                 'shown': (st['role'] if over else st['shown']) if st else None,
                 'sheriff': bool(g and g['sheriff'] == s),
             })
+        if p['id'] in (self.host, self.owner):
+            v['claims'] = [{'rid': c['rid'], 'seat': c['seat'], 'name': c['name']}
+                           for c in sorted(self.claims.values(), key=lambda c: c['at'])
+                           if self._claim_live(c) and self._may_approve(p, c)]
         if p['id'] == self.host:
             v['cues'] = [{'id': c['id'], 'clips': c['clips'], 'text': cue_text(c['clips'])}
                          for c in self.cues]
+            if self.phase == 'night' and g['night']['sub'] == 'act':
+                v['skip_key'] = self._skip_key()
 
         if self.phase == 'lobby':
             v['err'] = validate_config(self.config)
@@ -1877,6 +2043,10 @@ class Room(object):
                 return {'type': step, 'ui': 'info', 'title': '你被选为情侣',
                         'lines': ['你的情侣是 %d号。' % other, self._lover_camp() + '。',
                                   '你们一人出局，另一人会殉情。'], 'ok': '知道了，闭眼'}
+            if st['role'] == 'cupid' and not g['lovers']:
+                # 房主把丘比特环节跳过了（丘比特没在手机上选）：这一局没有情侣
+                return {'type': step, 'ui': 'info', 'title': '这一局没有情侣',
+                        'lines': ['你没有连情侣。点下面的按钮，然后闭眼。'], 'ok': '知道了，闭眼'}
             if st['role'] == 'cupid':
                 return {'type': step, 'ui': 'info', 'title': '情侣已经连好',
                         'lines': ['情侣是 %s。' % _join(g['lovers']),
@@ -2001,7 +2171,7 @@ class Room(object):
             'sheriff': g['sheriff'],
         }
         if d['order_opts'] and d['stage'] == 'discuss':
-            out['order'] = {'mine': seat == g['sheriff'], 'opts': d['order_opts']}
+            out['order'] = {'mine': bool(seat) and seat == g['sheriff'], 'opts': d['order_opts']}
         if d['settle']:
             pend = d['settle']['pending']
             mine = pend.get(seat)
