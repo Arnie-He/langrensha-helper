@@ -1304,10 +1304,10 @@
     var main = '<div class="verdict ' + w + '"><h1>' + emb + ttl + '</h1>' +
       '<p>' + (V.me ? '你是' + role(V.me.role).name + '，' + (mine === w ? '赢了' : '输了') : '') + '</p></div>' +
       grid(function (s) {
-        var c = o.causes[s.seat], love = has(o.lovers, s.seat);
+        var c = o.causes[s.seat], love = has(o.lovers, s.seat), mixed = s.shown === 'mixed';
         return tile(s, {
-          cls: s.shown && role(s.shown).team === 'wolf' ? 'wolfrole' : '',
-          tag: role(s.shown).name + (love ? '·情侣' : '') + (c ? '<br>' + esc(c) : '')
+          cls: s.shown && (role(s.shown).team === 'wolf' || (mixed && o.camps[s.seat] === 'wolf')) ? 'wolfrole' : '',
+          tag: role(s.shown).name + (mixed && o.model && !love ? '·跟' + o.model + '号' : '') + (love ? '·情侣' : '') + (c ? '<br>' + esc(c) : '')
         });
       }) +
       '<div class="sec-t">复盘</div><div class="card log">' + o.log.map(function (t) { return '<p>' + esc(t) + '</p>'; }).join('') + '</div>';
@@ -1328,7 +1328,7 @@
       }
       (me.notes || []).forEach(function (t) { notes.push(esc(t)); });
       html = '<div class="pk ' + r.team + '">' + medal(me.role) + '<div class="who">' + V.you.seat + ' 号</div>' +
-        '<div class="role">' + r.name + '</div><div class="team">' + (r.team === 'wolf' ? '狼人阵营' : '好人阵营') + '</div>' +
+        '<div class="role">' + r.name + '</div><div class="team">' + (me.role === 'mixed' ? '阵营跟随榜样' : r.team === 'wolf' ? '狼人阵营' : '好人阵营') + '</div>' +
         '<div class="desc">' + esc(r.desc) + '</div>' +
         (notes.length ? '<div class="notes">' + notes.join('<br>') + '</div>' : '') + '</div>';
     }
@@ -1372,7 +1372,7 @@
 
   function nightOrderText() {
     var roles = V.config.roles;
-    var steps = ['cupid', 'nightmare', 'magician', 'dreamer', 'guard', 'mech', 'wolf', 'beauty', 'gargoyle',
+    var steps = ['mixed', 'cupid', 'nightmare', 'magician', 'dreamer', 'guard', 'mech', 'wolf', 'beauty', 'gargoyle',
       'witch', 'seer', 'psychic', 'gravekeeper', 'witcher'];
     return steps.filter(function (r) { return r === 'wolf' || roles[r]; })
       .map(function (r) { return r === 'wolf' ? '狼人' : role(r).name; }).join(' → ');
@@ -1424,6 +1424,7 @@
       group('狼人阵营', function (r) { return r.team === 'wolf'; }) +
       group('平民', function (r) { return r.kind === 'villager'; }) +
       group('神职', function (r) { return r.kind === 'god'; }) +
+      group('其他', function (r) { return r.team !== 'wolf' && r.kind !== 'villager' && r.kind !== 'god'; }) +
       '<div class="seg-t">警长竞选</div>' + seg('sheriff', [['true', '有'], ['false', '没有']]) +
       '<div class="seg-t">女巫自救</div>' + seg('witch_self_save', [['first', '仅首夜'], ['never', '不可以'], ['always', '可以']]) +
       '<div class="seg-t">狼人获胜条件</div>' + seg('win', [['side', '屠边'], ['all', '屠城']]) +

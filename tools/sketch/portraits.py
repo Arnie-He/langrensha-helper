@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""22 个角色的头像：大头、小身子、圆白眼、乱线排出来的阴影。
+"""23 个角色的头像：大头、小身子、圆白眼、乱线排出来的阴影。
 
 人和狼各有一副共用的「底稿」（bust / head / eyes，wolf_*），每个角色在底稿上
 加帽子、头发、道具。画布是 200×200，重要内容都在中间的圆里（界面上多数地方裁成圆形）。
 """
-from rough import Pen, INK, PAPER, BONE, mir, oval, arc, star
+from rough import Pen, INK, PAPER, BONE, mir, oval, arc, star, sample
 
 SKIN = '#e2d0ad'
 DARK = '#2b241d'
@@ -551,6 +551,56 @@ def cupid(p):
         p.line(124 + k * 5, 198 - k * 5, 116 + k * 5, 196 - k * 5, w=1.4, passes=1)
 
 
+def mixed(p):
+    """混血儿：左半张是人脸，右半张是狼脸，中间一道缝线。"""
+    fur, muzzle = '#6f675c', '#9c8f79'
+    backdrop(p, '#7d7766')
+    bust(p, '#5c544a')
+    ruff(p, '#8d7a5c', y=160)
+    # 右边一只狼耳朵，左边一只人耳朵（先画耳朵，脑袋盖住耳根）
+    e = mir([(60, 74), (44, 42), (40, 12), (66, 32), (90, 54)])
+    i = mir([(62, 62), (52, 40), (49, 26), (64, 38), (78, 54)])
+    p.shape(e, fur, smooth=False, w=3.0)
+    p.fill(i, DARK, smooth=False, jit=.8, shift=.5)
+    p.hatch(i, angle=-70, gap=3.5, op=.5, smooth=False, color=BONE)
+    p.shape(oval(49, 98, 7, 11, n=8), SKIN, w=2.2)
+    p.shape(HEAD, SKIN, w=3.0)
+    # 右半张脸铺成狼毛：沿着脑袋的轮廓取右半边，再沿中线的缝补回去
+    outline = sample(HEAD, closed=True)
+    right = [q for q in outline[:outline.index(min(outline, key=lambda q: abs(q[0] - 100) + abs(q[1] - 146)))]
+             if q[0] >= 99]
+    seam = [(100, 146), (97, 134), (103, 122), (97, 108), (103, 94), (97, 80), (103, 66), (97, 52), (100, 38)]
+    half = right + seam
+    p.fill(half, fur, smooth=False, jit=.6, shift=.8)
+    p.hatch(half, angle=-55, gap=4.2, op=.45, smooth=False)
+    p.fill([(104, 108), (124, 110), (134, 124), (120, 136), (104, 138)], muzzle, jit=.6, shift=.5, op=.9)
+    for k in range(5):                                             # 右边脸颊上翘起来的毛
+        x, y = 146 - k * 2, 66 + k * 14
+        p.line(x, y, x + 10, y - 4, w=1.6, passes=1)
+    p.stroke(seam, w=2.2, smooth=False)
+    for k in range(4):                                             # 缝线上的针脚
+        y = 58 + k * 22
+        p.line(93, y, 107, y + 3, w=1.4, passes=1)
+    # 左边：人的头发
+    hair = [(52, 74), (50, 50), (66, 32), (88, 26), (100, 30), (98, 46), (88, 40), (80, 54), (70, 48), (62, 64)]
+    p.shape(hair, BROWN, w=2.6)
+    p.hatch(hair, angle=60, gap=5, op=.4)
+    # 眼睛：左边圆眼，右边狼眼
+    eyes(p, look=(2, 2), only=-1)
+    p.stroke([(62, 74), (76, 70), (91, 75)], w=3.2, over=1.5)
+    we = mir([(60, 95), (75, 84), (93, 97), (76, 105)])
+    p.shape(we, '#c9a13a', w=2.8)
+    p.line(123, 87, 123, 103, w=3.0, passes=1)
+    p.stroke([(146, 80), (126, 77), (107, 89)], w=4.0, over=2)
+    nose(p)
+    # 嘴：左边平平的，右边咧开露出一颗獠牙
+    p.line(84, 128, 100, 128, w=2.6)
+    p.stroke([(100, 128), (110, 126), (120, 119)], w=2.6)
+    p.shape([(105, 127), (108, 138), (113, 126)], BONE, smooth=False, w=1.8)
+    for k in range(3):                                             # 胡须点
+        p.dot(114 + k * 5, 114 + (k % 2) * 5, 1.1)
+
+
 # ------------------------------------------------------------------ 狼人
 
 def wolf(p):
@@ -744,7 +794,7 @@ def mech(p):
 
 ROLES = [('villager', villager), ('seer', seer), ('witch', witch), ('hunter', hunter), ('guard', guard),
          ('idiot', idiot), ('knight', knight), ('psychic', psychic), ('gravekeeper', gravekeeper),
-         ('dreamer', dreamer), ('magician', magician), ('witcher', witcher), ('cupid', cupid),
+         ('dreamer', dreamer), ('magician', magician), ('witcher', witcher), ('cupid', cupid), ('mixed', mixed),
          ('wolf', wolf), ('wolfking', wolfking), ('whitewolf', whitewolf), ('beauty', beauty),
          ('nightmare', nightmare), ('bloodmoon', bloodmoon), ('ghostrider', ghostrider), ('gargoyle', gargoyle),
          ('mech', mech)]

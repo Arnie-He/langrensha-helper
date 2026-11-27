@@ -11,7 +11,8 @@
     python3 tools/soak.py --base=http://localhost:3299 --games=3 --flaky=12
     python3 tools/soak.py --base=... --board=p12g --flaky=8 --flaky-host
 
-    --board=     板子：预设的编号（p12a ...），或者 15（15 人 通灵师女巫猎人守卫骑士 + 狼王机械狼，默认）
+    --board=     板子：预设的编号（p12a ...），或者 15（15 人 通灵师女巫猎人守卫骑士 + 狼王机械狼，默认），
+                 或者 15m（同一个 15 人板，拿一张村民换成混血儿）
     --flaky=     每个玩家平均多少秒掉一次线（0 = 不掉线）
     --flaky-host 房主的手机也会掉线
     --takeover   房主掉线或播报停了的时候，其他人会接手播报
@@ -33,6 +34,7 @@ from roles import PRESETS  # noqa: E402
 
 BOARD15 = {'wolf': 3, 'wolfking': 1, 'mech': 1, 'psychic': 1, 'witch': 1, 'hunter': 1,
            'guard': 1, 'knight': 1, 'villager': 5}
+BOARD15M = dict(BOARD15, villager=4, mixed=1)
 
 
 def opt(name, default):
@@ -48,7 +50,7 @@ def main():
     flaky = float(opt('flaky', '12'))
     stall = float(opt('stall', '120'))
     board = opt('board', '15')
-    roles = BOARD15 if board == '15' else next(p['roles'] for p in PRESETS if p['id'] == board)
+    roles = {'15': BOARD15, '15m': BOARD15M}.get(board) or next(p['roles'] for p in PRESETS if p['id'] == board)
     n = sum(roles.values())
 
     takeover = '--takeover' in sys.argv

@@ -107,7 +107,7 @@ function reset(o) {
     }
   };
   SERVER = { join: 'join' in o ? o.join : (o.saved || null), view: null, manifest: o.manifest || { a: 1, b: 1, c: 1, test: 1 }, beatStatus: 200, down: false, badAudio: false, onAct: null,
-    slow: {}, claims: [], claimResult: null };
+    slow: {}, claims: [], claimResult: null, info: o.info || null };
 
   var els = { app: new El('root'), sheet: new El('sheet'), peek: new El('peek'), toast: new El('toast') };
   globalThis.document = {
@@ -154,7 +154,7 @@ function reset(o) {
 
 function route(path, body) {
   function ok(j) { return { status: 200, json: j }; }
-  if (path === '/api/info') return ok({ lan: null, presets: [], roles: [] });
+  if (path === '/api/info') return ok(SERVER.info || { lan: null, presets: [], roles: [] });
   if (path === '/healthz') return ok({});
   if (path === 'audio/manifest.json') return ok(SERVER.manifest);
   if (/^audio\//.test(path)) return SERVER.badAudio ? { status: 404, json: {} } : ok({});
@@ -897,6 +897,86 @@ test('按下的按钮被整块重画了：手指下面还是同一个按钮就�
   fire('pointerup', { target: d });
   fire('click', { target: d });
   eq(acts.filter(function (x) { return x.type === 'sit'; }).length, 1, '换成别的按钮不应该算数');
+});
+
+// ================================================================ 混血儿
+
+var INFO = { lan: null, presets: [], roles: [
+  { id: 'wolf', name: '狼人', team: 'wolf', kind: 'wolf', desc: '' },
+  { id: 'villager', name: '村民', team: 'good', kind: 'villager', desc: '' },
+  { id: 'seer', name: '预言家', team: 'good', kind: 'god', desc: '' },
+  { id: 'mixed', name: '混血儿', team: 'good', kind: 'none', desc: '第一夜选一名其他玩家做榜样' }
+] };
+var MIXED = { type: 'mixed', ui: 'pick', title: '混血儿，选一名玩家做榜样', hint: '你和他同一阵营、同输同赢，但看不到他的身份。',
+  targets: [2, 3], verb: '跟随', count: 1, skip: null, tone: 'gold', marks: {} };
+
+test('混血儿第一夜选榜样：没有「跳过」，按钮写「跟随 2 号」，发出去的就是 2 号', function () {
+  boot({ info: INFO });
+  push(night({ me: { role: 'mixed', alive: true, team: 'good', notes: [] }, night: { prompt: MIXED } }));
+  ok(seen('混血儿，选一名玩家做榜样'));
+  ok(seen('先选一名玩家'));
+  ok(!seen('night-skip'), '必须选，不能跳过');
+  tap(btn('pick', { seat: '2' }));
+  ok(seen('跟随 2 号'));
+  tap(btn('night-go'));
+  eq(acts.filter(function (a) { return a.type === 'night'; }).map(function (a) { return a.data; }), [{ targets: [2] }]);
+});
+
+test('混血儿按住看身份：写「阵营跟随榜样」和榜样是几号，不写「好人阵营」；狼人照旧写狼人阵营', function () {
+  boot({ info: INFO });
+  push(night({ me: { role: 'mixed', alive: true, team: 'good', notes: ['你的榜样是 2号'] } }));
+  var b = btn(null, { hold: '1' }, '按住看身份');
+  fire('pointerdown', { target: b });
+  ok(RENDER.peek.indexOf('阵营跟随榜样') >= 0, RENDER.peek);
+  ok(RENDER.peek.indexOf('你的榜样是 2号') >= 0);
+  ok(RENDER.peek.indexOf('好人阵营') < 0);
+  fire('pointerup', { target: b });
+  push(night({ me: { role: 'wolf', alive: true, team: 'wolf', notes: [] } }));
+  fire('pointerdown', { target: b });
+  ok(RENDER.peek.indexOf('狼人阵营') >= 0, RENDER.peek);
+  fire('pointerup', { target: b });
+});
+
+test('改板子：混血儿单独一组「其他」，不算平民也不算神职；夜晚顺序里排第一', function () {
+  boot({ info: INFO });
+  push(view({ config: { roles: { wolf: 1, villager: 1, seer: 1, mixed: 1 }, sheriff: false, witch_self_save: 'never', win: 'side' }, n: 4 }));
+  tap(btn('config'));
+  var sh = RENDER.sheet;
+  ok(sh.indexOf('平民<span>1 人</span>') >= 0, '平民只有村民');
+  ok(sh.indexOf('神职<span>1 人</span>') >= 0, '神职只有预言家');
+  ok(sh.indexOf('其他<span>1 人</span>') >= 0, sh);
+  ok(sh.slice(sh.indexOf('其他<span>')).indexOf('混血儿') >= 0, '混血儿在「其他」这一组');
+  ok(sh.slice(sh.indexOf('平民<span>'), sh.indexOf('其他<span>')).indexOf('混血儿') < 0, '不在平民和神职里');
+  tap(btn('close'));
+  tap(btn('menu'));
+  ok(RENDER.sheet.indexOf('夜晚顺序：混血儿 → 狼人 → 预言家') >= 0, RENDER.sheet);
+});
+
+test('结束亮牌：混血儿写上跟的是几号，跟了狼就标成狼人那边，输赢跟着榜样', function () {
+  boot({ info: INFO });
+  var v = view({ phase: 'over', night_no: 2, badge: 'off', you: { id: 'p3', name: 'P3', seat: 3, host: false },
+    me: { role: 'mixed', alive: true, team: 'good', notes: [] } });
+  v.seats[0].shown = 'wolf'; v.seats[1].shown = 'villager'; v.seats[2].shown = 'mixed';
+  v.over = { winner: 'good', log: ['混血儿 3号 的榜样是 1号，属于狼人阵营', '好人阵营获胜'], lovers: [], third: false, model: 1,
+    camps: { 1: 'wolf', 2: 'good', 3: 'wolf' }, causes: {} };
+  push(v);
+  ok(seen('你是混血儿，输了'), RENDER.app);
+  ok(seen('混血儿·跟1号'));
+  eq(RENDER.app.split('wolfrole').length - 1, 2, '1 号狼人和跟狼的 3 号都标成狼人那边');
+  ok(seen('混血儿 3号 的榜样是 1号，属于狼人阵营'));
+  v.over.camps = { 1: 'wolf', 2: 'good', 3: 'good' };
+  v.over.model = 2;
+  push(v);
+  ok(seen('你是混血儿，赢了'));
+  eq(RENDER.app.split('wolfrole').length - 1, 1);
+  v.over.model = 0;                                  // 房主跳过了他的环节：没有榜样
+  push(v);
+  ok(seen('你是混血儿，赢了'));
+  ok(!seen('·跟'), '没有榜样就不写跟几号');
+  v.over.model = 2; v.over.lovers = [2, 3];          // 被连成情侣：按情侣算，不写跟几号
+  push(v);
+  ok(seen('混血儿·情侣'), RENDER.app);
+  ok(!seen('·跟'));
 });
 
 print('\n' + (total - failures) + ' / ' + total + ' 通过');

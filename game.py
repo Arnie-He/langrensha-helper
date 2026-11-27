@@ -537,6 +537,7 @@ class Room(object):
             'charm': 0, 'charm_last': 0,
             'swapped': set(),                  # 魔术师已经换过的号码
             'lovers': [], 'third': False,      # third = 人狼恋，情侣和丘比特是第三方
+            'model': None,                     # 混血儿的榜样：None = 还没选，0 = 没选（被房主跳过）
             'mech': None,                      # 机械狼学到了什么
             'knight_used': False, 'reflect_used': False,
             'seal_night': 0,                   # 血月使徒自爆后，哪一夜封印神职
@@ -757,11 +758,21 @@ class Room(object):
             return
         getattr(self, '_n_' + step)(seat, data)
 
+    def _n_mixed(self, seat, data):
+        g = self.g
+        t = self._pick(data)[0]
+        if t == seat:
+            raise GameError('不能选自己做榜样')
+        g['model'] = t
+        self._note(seat, '你的榜样是 %d号' % t)
+        g['night']['log'].append('混血儿选 %d号 做榜样' % t)
+        self._end_act()
+
     def _n_cupid(self, seat, data):
         g = self.g
         a, b = sorted(self._pick(data, 2))
         g['lovers'] = [a, b]
-        g['third'] = self._team(a) != self._team(b)
+        g['third'] = self._team(a) != self._team(b)     # 混血儿按好人牌算，不看榜样
         g['night']['log'].append('丘比特连 %d号 和 %d号 为情侣%s'
                                  % (a, b, '（人狼恋，第三方）' if g['third'] else ''))
         self._end_act()
@@ -1068,6 +1079,8 @@ class Room(object):
         if data.get('key') is not None and data.get('key') != self._skip_key():
             raise GameError('那个环节已经结束了')           # 确认框打开以后，流程已经走到下一个角色
         nt = self.g['night']
+        if self._step() == 'mixed' and self.g['model'] is None:
+            self.g['model'] = 0
         if self._step() == 'wolf' and not nt['no_kill']:
             picks = [nt['picks'][w] for w in self._holders() if w in nt['picks']]
             best = max(picks.count(x) for x in picks) if picks else 0
@@ -1199,6 +1212,9 @@ class Room(object):
         role = self._role(seat)
         if g['third'] and (seat in g['lovers'] or role == 'cupid'):
             return 'third'
+        # 混血儿和榜样同输同赢（榜样是第三方，他也是）。被连成情侣的混血儿按情侣的规则算，不再跟随榜样
+        if role == 'mixed' and seat not in g['lovers']:
+            return self._camp(g['model']) if g['model'] else 'good'   # 榜样不会是他自己，也只有一张混血儿
         if ROLES[role]['team'] == 'wolf':
             return 'wolf'
         if role == 'cupid' and g['lovers'] and all(self._team(s) == 'wolf' for s in g['lovers']):
@@ -1208,7 +1224,8 @@ class Room(object):
     def _check_win(self):
         g = self.g
         seats = g['seats']
-        alive = self._alive()
+        # 混血儿不算神也不算民，也不挡着谁获胜：游戏什么时候结束只看其他人。他自己的输赢看 _camp
+        alive = [s for s in self._alive() if seats[s]['role'] != 'mixed']
         if g['third']:
             if all(seats[s]['alive'] for s in g['lovers']):
                 # 情侣还在：只剩第三方则他们赢，否则谁都还没赢
@@ -1240,6 +1257,12 @@ class Room(object):
         g = self.g
         g['winner'] = winner
         self.phase = 'over'
+        for s in sorted(g['seats']):
+            if g['seats'][s]['role'] == 'mixed':
+                camp = {'good': '好人阵营', 'wolf': '狼人阵营', 'third': '第三方'}[self._camp(s)]
+                why = '被连成情侣' if s in g['lovers'] else (
+                    '的榜样是 %d号' % g['model'] if g['model'] else '没有选榜样')
+                g['log'].append('混血儿 %d号 %s，属于%s' % (s, why, camp))
         g['log'].append({'good': '好人阵营获胜', 'wolf': '狼人阵营获胜',
                          'third': '情侣阵营（第三方）获胜'}[winner])
         self.cue(['win_' + winner])
@@ -1285,7 +1308,9 @@ class Room(object):
             'extra_dead': [],          # 竞选时自爆出局、还没走确认流程的人
         }
         g['last_exiled'] = 0           # 守墓人只看前一个白天的放逐结果
-        if g['badge'] == 'open' and g['night_no'] == g['elect_day']:
+        if self._check_win():
+            self._announce()           # 夜里没人死也已经分出胜负（丘比特连完情侣就只剩第三方）：不竞选，直接结束
+        elif g['badge'] == 'open' and g['night_no'] == g['elect_day']:
             self._start_election()     # 先竞选警长，再公布昨夜死讯
         else:
             self._announce()
@@ -1493,7 +1518,7 @@ class Room(object):
         d = g['day']
         seats = g['seats']
         d['stage'] = 'wait'
-        winner = None
+        winner = self._check_win()                     # 天亮之前就已经满足的胜利条件最先算
         died = []
         for x in nt['deaths']:
             if not seats[x['seat']]['alive']:
@@ -1967,7 +1992,7 @@ class Room(object):
             v['day'] = self._day_view(seat, st)
         elif over:
             v['over'] = {'winner': g['winner'], 'log': g['log'], 'lovers': g['lovers'],
-                         'third': g['third'],
+                         'third': g['third'], 'model': g['model'] or 0,
                          'camps': {s: self._camp(s) for s in g['seats']},
                          'causes': {s: CAUSE_TEXT.get(x['cause'], '') for s, x in g['seats'].items()
                                     if x['cause']}}
@@ -1985,6 +2010,10 @@ class Room(object):
             notes.append('你连的情侣是 %s（%s）' % (_join(g['lovers']), self._lover_camp()))
         if ROLES[role].get('pack') and not g['pack_met']:
             notes.append('第一夜「狼人请睁眼」时，你会看到同伴是谁')
+        if role == 'mixed' and seat in g['lovers']:
+            notes.append('你被连成了情侣，按情侣算阵营，不再跟随榜样')
+        elif role == 'mixed' and g['model'] == 0:
+            notes.append('第一夜没有选榜样，你算好人阵营')
         if role == 'witch':
             notes.append('解药：%s　毒药：%s' % ('还在' if g['witch']['antidote'] else '已用',
                                             '还在' if g['witch']['poison'] else '已用'))
@@ -2040,9 +2069,10 @@ class Room(object):
                 return None
             if seat in g['lovers']:
                 other = [x for x in g['lovers'] if x != seat][0]
-                return {'type': step, 'ui': 'info', 'title': '你被选为情侣',
-                        'lines': ['你的情侣是 %d号。' % other, self._lover_camp() + '。',
-                                  '你们一人出局，另一人会殉情。'], 'ok': '知道了，闭眼'}
+                lines = ['你的情侣是 %d号。' % other, self._lover_camp() + '。', '你们一人出局，另一人会殉情。']
+                if st['role'] == 'mixed':
+                    lines.append('你按情侣算阵营，不再跟随榜样。')
+                return {'type': step, 'ui': 'info', 'title': '你被选为情侣', 'lines': lines, 'ok': '知道了，闭眼'}
             if st['role'] == 'cupid' and not g['lovers']:
                 # 房主把丘比特环节跳过了（丘比特没在手机上选）：这一局没有情侣
                 return {'type': step, 'ui': 'info', 'title': '这一局没有情侣',
@@ -2085,6 +2115,9 @@ class Room(object):
                     # 解药用掉以后，女巫不再知道刀口
                     'victim': nt['main'] if w['antidote'] else None,
                     'can_save': self._witch_can_save(seat), 'targets': others}
+        if step == 'mixed':
+            return self._pick_prompt(step, '混血儿，选一名玩家做榜样', '你和他同一阵营、同输同赢，但看不到他的身份。',
+                                     others, '跟随')
         if step == 'cupid':
             return self._pick_prompt(step, '丘比特，选两名玩家成为情侣', '可以选自己。一人出局，另一人殉情。',
                                      alive, '连为情侣', count=2)

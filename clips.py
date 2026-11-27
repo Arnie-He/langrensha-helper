@@ -15,6 +15,10 @@ CLIPS = {
     'day_break': '天亮了，请大家睁眼',
 
     # ---- 夜晚各环节：睁眼 / 操作提示 / 闭眼
+    'mixed_open': '混血儿请睁眼',
+    'mixed_prompt': '请选择你的榜样',
+    'mixed_close': '混血儿请闭眼',
+
     'cupid_open': '丘比特请睁眼',
     'cupid_prompt': '请选择两名玩家成为情侣',
     'cupid_close': '丘比特请闭眼',

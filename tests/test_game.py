@@ -10,7 +10,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 
 import game  # noqa: E402
 from game import GameError, Room  # noqa: E402
-from roles import NIGHT_STEPS, PRESETS, ROLES, full_roles, night_steps  # noqa: E402
+from clips import CLIPS  # noqa: E402
+from roles import NIGHT_STEPS, PRESETS, ROLE_ORDER, ROLES, full_roles, night_steps  # noqa: E402
+
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 
 
 class Clock(object):
@@ -57,7 +60,7 @@ class FixedRng(object):
 
 
 # 夜里选人的角色，在 Table.night(...) 里用哪个参数名指定目标
-KEY = {'cupid': 'lovers', 'nightmare': 'fear', 'magician': 'swap', 'dreamer': 'dream',
+KEY = {'mixed': 'model', 'cupid': 'lovers', 'nightmare': 'fear', 'magician': 'swap', 'dreamer': 'dream',
        'guard': 'guard', 'mech': 'mech', 'beauty': 'charm', 'gargoyle': 'garg',
        'seer': 'check', 'psychic': 'psy', 'witcher': 'hunt'}
 
@@ -1116,6 +1119,362 @@ class Cupid(unittest.TestCase):
         t.confirm_dead()
         t.night(kill=6)                                      # 丘比特已是第三方，不算好人的神
         self.assertEqual(t.view(2)['over']['winner'], 'wolf')
+
+
+class Mixed(unittest.TestCase):
+    """混血儿：第一夜选榜样，和榜样同输同赢；被查验算好人；不影响游戏什么时候结束。"""
+    # 1-3 狼，4-7 民，8 预言家，9 女巫，10 猎人，11 骑士，12 混血儿
+    D = ['wolf'] * 3 + ['villager'] * 4 + ['seer', 'witch', 'hunter', 'knight', 'mixed']
+
+    def test_wakes_first_only_on_the_first_night_and_must_pick_someone_else(self):
+        t = Table(self.D)
+        t.deal()
+        self.assertEqual(t.view(12)['me']['notes'], [])
+        t.heard = []
+        t.act(1, 'start_night')
+        t.flush()
+        self.assertEqual(t.types(), {12: 'mixed'})           # 最先睁眼，别人的手机上什么都没有
+        pr = t.prompts()[12]
+        self.assertEqual(pr['targets'], list(range(1, 12)))  # 不能选自己
+        self.assertIsNone(pr['skip'])                        # 必须选
+        with self.assertRaises(GameError):
+            t.act(12, 'night', targets=[12])
+        with self.assertRaises(GameError):
+            t.act(12, 'night', skip=True)
+        with self.assertRaises(GameError):
+            t.act(5, 'night', targets=[2])                   # 不是混血儿
+        t.act(12, 'night', targets=[2])
+        t.flush()
+        self.assertEqual(t.g['model'], 2)
+        self.assertIn('你的榜样是 2号', t.view(12)['me']['notes'])
+        t.night(kill=0)
+        self.assertEqual(t.heard[:5], ['night_fall', 'mixed_open', 'mixed_prompt', 'mixed_close', 'wolf_open'])
+        t.no_exile()
+        t.heard = []
+        t.night(kill=0)
+        self.assertNotIn('mixed_open', t.heard)              # 只有第一夜
+        self.assertEqual(t.g['model'], 2)
+
+    def test_nobody_else_learns_anything(self):
+        t = Table(self.D)
+        t.deal()
+        t.night(model=2, kill=0)
+        self.assertEqual([m['seat'] for m in t.view(1)['me']['mates']], [2, 3])   # 跟了狼也不和狼见面
+        for s in range(1, 12):
+            self.assertNotIn('榜样', repr(t.view(s)))        # 榜样本人和其他人都不知道
+            self.assertNotIn("'model'", repr(t.view(s)))
+        v = t.view(12)
+        self.assertNotIn('mates', v['me'])
+        self.assertNotIn('狼人', repr(v['me']['notes']))     # 混血儿自己也不知道榜样是什么身份
+        t.no_exile()
+        t.act(1, 'start_night')
+        t.flush()
+        self.assertEqual(t.types(), {1: 'wolf', 2: 'wolf', 3: 'wolf'})   # 第二夜：没有混血儿环节，他也不在狼队里
+        self.assertEqual(t.prompts()[1]['wolves'], [1, 2, 3])
+
+    def test_follows_a_wolf_checks_as_good_and_loses_when_the_wolves_are_out(self):
+        t = Table(self.D)
+        t.deal()
+        t.night(model=2, kill=0, check=12)
+        self.assertIn('第1夜查验 12号：好人', t.view(8)['me']['notes'])   # 预言家验混血儿永远是好人
+        self.assertEqual(t.room._camp(12), 'wolf')
+        t.exile(1)
+        t.night(kill=0)
+        t.exile(2)                                           # 榜样出局，混血儿还是狼人阵营
+        self.assertEqual(t.room._camp(12), 'wolf')
+        t.night(kill=0)
+        t.exile(3)
+        self.assertEqual(t.room.phase, 'over')               # 狼人全部出局就结束，不用等跟狼的混血儿
+        o = t.view(12)['over']
+        self.assertEqual(o['winner'], 'good')
+        self.assertEqual(o['camps'][12], 'wolf')             # 他跟着狼人输了
+        self.assertEqual(o['model'], 2)
+        self.assertTrue(t.g['seats'][12]['alive'])
+        self.assertIn('混血儿 12号 的榜样是 2号，属于狼人阵营', o['log'])
+
+    def test_wolves_win_by_killing_the_villagers_without_touching_him(self):
+        for model, camp in ((5, 'good'), (1, 'wolf')):
+            t = Table(['wolf', 'wolf', 'villager', 'villager', 'seer', 'witch', 'mixed'])
+            t.deal()
+            t.night(model=model, kill=3)
+            t.no_exile()
+            t.night(kill=4)                                  # 两个村民都死了：屠民，混血儿不算民
+            o = t.view(7)['over']
+            self.assertEqual(o['winner'], 'wolf')
+            self.assertEqual(o['camps'][7], camp)
+            self.assertTrue(t.g['seats'][7]['alive'])
+
+    def test_does_not_count_as_a_god_either(self):
+        t = Table(['wolf', 'wolf', 'villager', 'villager', 'villager', 'seer', 'mixed'])
+        t.deal()
+        t.night(model=3, kill=6)                             # 唯一的神死了：屠神
+        self.assertEqual(t.view(1)['over']['winner'], 'wolf')
+
+    def test_game_goes_on_while_the_others_are_alive(self):
+        t = Table(['wolf', 'wolf', 'villager', 'villager', 'seer', 'witch', 'mixed'])
+        t.deal()
+        t.night(model=1, kill=0)
+        t.exile(7)                                           # 混血儿出局不影响任何一边
+        self.assertEqual(t.room.phase, 'day')
+        t.night(kill=3)
+        self.assertEqual(t.room.phase, 'day')
+
+    def test_host_skipping_him_leaves_him_on_the_good_side(self):
+        t = Table(['mixed'] + self.D[:11])                   # 房主就是混血儿
+        t.deal()
+        t.act(1, 'start_night')
+        t.flush()
+        self.assertEqual(t.types(), {1: 'mixed'})
+        t.act(1, 'skip')
+        t.flush()
+        self.assertEqual(t.g['model'], 0)
+        self.assertIn('第一夜没有选榜样，你算好人阵营', t.view(1)['me']['notes'])
+        self.assertEqual(t.room._camp(1), 'good')
+        t.night(kill=0)
+        self.assertEqual(t.room.phase, 'day')
+        for w in (2, 3, 4):
+            t.exile(w)
+            if w != 4:
+                t.night(kill=0)
+        o = t.view(1)['over']
+        self.assertEqual(o['winner'], 'good')
+        self.assertEqual(o['model'], 0)
+        self.assertEqual(o['camps'][1], 'good')
+        self.assertIn('混血儿 1号 没有选榜样，属于好人阵营', o['log'])
+
+    def test_third_party_that_wins_at_the_link_wins_at_dawn(self):
+        """1 狼，2 村民，3 丘比特，4 混血儿：丘比特连 1 和 2 以后，除了混血儿全是第三方，夜里没人死也算赢。"""
+        for kill in (0, 2, 1, 3):
+            t = Table(['wolf', 'villager', 'cupid', 'mixed'], sheriff=True)
+            t.deal()
+            t.night(model=3, lovers=(1, 2), kill=kill)
+            o = t.view(1)['over']
+            self.assertEqual(o['winner'], 'third', kill)     # 先满足胜利条件的一方获胜，不看之后谁先死
+            self.assertEqual(o['camps'][4], 'third')         # 他跟的是丘比特
+            self.assertEqual(t.heard[-1], 'win_third')
+
+    def test_in_win_all_mode_he_still_does_not_count(self):
+        t = Table(['wolf', 'wolf', 'villager', 'villager', 'seer', 'witch', 'mixed'], win='all')
+        t.deal()
+        t.night(model=3, kill=3)
+        t.exile(4)
+        t.night(kill=5)
+        self.assertEqual(t.room.phase, 'day')                # 屠城：女巫还活着
+        t.exile(6)
+        o = t.view(7)['over']
+        self.assertEqual(o['winner'], 'wolf')               # 神和民都死光就结束，跟好人的混血儿活着也一样
+        self.assertEqual(o['camps'][7], 'good')
+        self.assertTrue(t.g['seats'][7]['alive'])
+
+    def test_a_board_without_gods_only_ends_on_the_villagers(self):
+        t = Table(['wolf', 'wolf', 'villager', 'villager', 'villager', 'mixed'])
+        t.deal()
+        t.night(model=1, kill=3)
+        self.assertEqual(t.room.phase, 'day')                # 他不算神：没有神的板子不会因此结束
+        t.no_exile()
+        t.night(kill=4)
+        self.assertEqual(t.room.phase, 'day')
+        t.no_exile()
+        t.night(kill=5)
+        self.assertEqual(t.view(6)['over']['winner'], 'wolf')
+
+    def test_never_holds_the_knife(self):
+        # 1 狼，2 石像鬼，3-5 民，6 预言家，7 女巫，8 混血儿
+        t = Table(['wolf', 'gargoyle', 'villager', 'villager', 'villager', 'seer', 'witch', 'mixed'])
+        t.deal()
+        t.night(model=1, kill=0)
+        self.assertEqual(t.room._camp(8), 'wolf')
+        t.exile(1)                                           # 狼群死光：轮到石像鬼刀人，跟狼的混血儿没有刀
+        t.confirm_dead()
+        t.act(1, 'start_night')
+        t.flush()
+        self.assertEqual(t.types(), {2: 'wolf'})
+
+    def test_model_can_be_the_mech_wolf_or_the_gargoyle(self):
+        for special in ('mech', 'gargoyle'):
+            # 1-2 狼，3 特殊狼，4-6 民，7 预言家，8 女巫，9 混血儿
+            t = Table(['wolf', 'wolf', special, 'villager', 'villager', 'villager', 'seer', 'witch', 'mixed'])
+            t.deal()
+            t.night(model=3, kill=0)
+            self.assertEqual(t.room._camp(9), 'wolf', special)
+
+    def test_host_drops_during_his_own_step(self):
+        deck = ['mixed'] + ['wolf'] * 3 + ['villager'] * 4 + ['seer', 'witch', 'hunter', 'guard']
+        t = Table(deck)                                      # 房主就是混血儿
+        t.deal()
+        t.act(1, 'start_night')
+        t.flush()
+        self.assertEqual(t.types(), {1: 'mixed'})
+        t.drop(1)                                            # 他的手机没电了
+        t.act(5, 'take_host')                                # 5 号接手播报
+        with self.assertRaises(GameError):
+            t.act(5, 'night', targets=[2])                   # 别人替不了他
+        mine = t.room.request_claim(1, '房主')               # 借一台手机回来认领自己的座位
+        t.act(5, 'claim_ok', rid=mine)
+        t.room.attach(t.pid[1])
+        self.assertEqual(t.prompts()[1]['type'], 'mixed')   # 新手机上接着选
+        t.act(1, 'night', targets=[2])
+        self.assertEqual(t.g['model'], 2)
+
+        t = Table(deck)
+        t.deal()
+        t.act(1, 'start_night')
+        t.flush()
+        t.drop(1)
+        t.act(5, 'take_host')
+        t.act(5, 'skip', key=t.view(5)['skip_key'])          # 等不回来：接手播报的人跳过这个环节
+        self.assertEqual(t.g['model'], 0)
+        self.assertEqual(t.room._camp(1), 'good')
+
+    def test_checks_duels_and_hunts_treat_him_as_good(self):
+        # 1-3 狼，4-6 民，7 通灵师，8 女巫，9 守墓人，10 骑士，11 混血儿
+        t = Table(['wolf'] * 3 + ['villager'] * 3 + ['psychic', 'witch', 'gravekeeper', 'knight', 'mixed'])
+        t.deal()
+        t.night(model=1, kill=0, psy=11)
+        self.assertIn('第1夜查验 11号：混血儿', t.view(7)['me']['notes'])
+        t.act(10, 'duel', target=11)                         # 决斗跟狼的混血儿：他不是狼人，骑士出局
+        t.flush()
+        self.assertFalse(t.g['seats'][10]['alive'])
+        self.assertTrue(t.g['seats'][11]['alive'])
+        t.exile(11)
+        t.night(kill=0)
+        self.assertIn('第1天被放逐的 11号：好人', t.view(9)['me']['notes'])
+
+        # 1-3 狼，4-6 民，7 预言家，8 女巫，9 白痴，10 猎魔人，11 混血儿
+        t = Table(['wolf'] * 3 + ['villager'] * 3 + ['seer', 'witch', 'idiot', 'witcher', 'mixed'])
+        t.deal()
+        t.night(model=1, kill=0)
+        t.no_exile()
+        t.night(kill=0, hunt=11)                             # 狩猎跟狼的混血儿：猎魔人自己出局
+        self.assertEqual(t.day()['night_deaths'], [10])
+        self.assertTrue(t.g['seats'][11]['alive'])
+
+    def test_mech_wolf_learning_him_gets_nothing(self):
+        # 1-3 狼，4 机械狼，5-7 民，8 混血儿，9 通灵师，10 女巫，11 猎人，12 守卫
+        t = Table(['wolf'] * 3 + ['mech'] + ['villager'] * 3 + ['mixed', 'psychic', 'witch', 'hunter', 'guard'])
+        t.deal()
+        t.night(model=5, kill=0, mech=8, psy=4)
+        self.assertIn('第1夜学习 8号：混血儿', t.view(4)['me']['notes'])
+        self.assertIn('第1夜查验 4号：混血儿', t.view(9)['me']['notes'])   # 学了以后被查验显示成混血儿
+        self.assertFalse(t.g['mech']['double'])
+        self.assertFalse(t.g['mech']['poison'])
+        t.no_exile()
+        t.act(1, 'start_night')
+        t.flush()
+        self.assertIsNone(t.room._mech_skill())             # 第二夜起也没有能用的技能
+
+    def test_as_a_lover_he_is_a_good_card_and_learns_nothing_about_his_model(self):
+        # 1 混血儿，2-3 狼，4-6 民，7 预言家，8 丘比特
+        D = ['mixed', 'wolf', 'wolf', 'villager', 'villager', 'villager', 'seer', 'cupid']
+        seen = {}
+        for model in (3, 4):                                 # 榜样是狼 / 是好人
+            for pair, third in (((1, 2), True), ((1, 5), False)):
+                t = Table(D)
+                t.deal()
+                t.act(1, 'start_night')
+                t.flush()
+                self.assertEqual(t.types(), {1: 'mixed'})    # 混血儿在丘比特之前
+                t.act(1, 'night', targets=[model])
+                t.flush()
+                self.assertEqual(t.types(), {8: 'cupid'})
+                t.act(8, 'night', targets=list(pair))
+                t.flush()
+                self.assertEqual(t.g['third'], third)        # 和狼连是人狼恋，和好人连是好人情侣，不看榜样
+                self.assertEqual(t.room._camp(1), 'third' if third else 'good')
+                self.assertEqual(t.room._camp(8), 'third' if third else 'good')
+                lines = t.prompts()[1]['lines']
+                self.assertIn('不再跟随榜样', lines[-1])
+                notes = t.view(1)['me']['notes']
+                self.assertTrue(any('不再跟随榜样' in n for n in notes))
+                text = repr((lines, notes)).replace('你的榜样是 %d号' % model, '你的榜样是 N号')
+                seen.setdefault(pair, set()).add(text)
+        for pair, texts in seen.items():
+            self.assertEqual(len(texts), 1, texts)          # 榜样是狼还是好人，他看到的一模一样
+
+    def test_a_couple_with_him_always_has_a_wolf_card_to_kill_at_night(self):
+        """跟了狼的混血儿和好人连成情侣：不算人狼恋。狼牌全部出局就是好人赢，不会僵住。"""
+        # 1 混血儿，2 狼，3 民，4 白痴，5 丘比特，6 预言家，7 民
+        t = Table(['mixed', 'wolf', 'villager', 'idiot', 'cupid', 'seer', 'villager'])
+        t.deal()
+        t.night(model=2, lovers=(1, 3), kill=6)
+        self.assertFalse(t.g['third'])
+        t.exile(4)                                           # 白痴翻牌
+        t.night(kill=7)
+        t.exile(2)                                           # 最后一张狼牌
+        o = t.view(1)['over']
+        self.assertEqual(o['winner'], 'good')
+        self.assertEqual(o['camps'][1], 'good')              # 情侣按情侣算：他跟着好人赢
+        self.assertIn('混血儿 1号 被连成情侣，属于好人阵营', o['log'])
+
+    def test_following_the_third_party_wins_with_them(self):
+        # 1-2 狼，3-5 民，6 预言家，7 丘比特，8 混血儿；1 和 3 是人狼恋
+        D = ['wolf', 'wolf', 'villager', 'villager', 'villager', 'seer', 'cupid', 'mixed']
+        for model, camp in ((7, 'third'), (4, 'good')):
+            t = Table(D)
+            t.deal()
+            t.night(model=model, lovers=(1, 3), kill=0)
+            self.assertEqual(t.room._camp(8), camp)
+            t.exile(2)
+            t.night(kill=4 if model != 4 else 5)
+            t.exile(5 if model != 4 else 6)
+            if model == 4:                                   # 榜样 4 号还活着：先把他放逐
+                t.night(kill=0)
+                t.exile(4)
+            else:
+                t.night(kill=6)
+            o = t.view(8)['over']                            # 只剩情侣、丘比特和混血儿
+            self.assertEqual(o['winner'], 'third')           # 混血儿活着也挡不住第三方获胜
+            self.assertEqual(o['camps'][8] == 'third', camp == 'third')
+            self.assertTrue(t.g['seats'][8]['alive'])
+
+
+class Assets(unittest.TestCase):
+    """加了新角色以后，头像、台词、语音文件一样都不能少。"""
+
+    def test_every_role_has_a_portrait(self):
+        for r in ROLE_ORDER:
+            self.assertTrue(os.path.exists(os.path.join(ROOT, 'public', 'avatars', r + '.svg')), r)
+
+    def test_mixed_counts_as_neither_god_nor_villager(self):
+        from roles import GODS
+        self.assertEqual(ROLES['mixed']['kind'], 'none')
+        self.assertNotIn('mixed', GODS)
+        self.assertEqual(ROLES['mixed']['team'], 'good')     # 被查验是好人
+
+    def test_client_test_role_table_matches_roles_py(self):
+        import re
+        with open(os.path.join(ROOT, 'tests', 'client_sim.js'), encoding='utf-8') as f:
+            js = f.read()
+        rows = re.findall(r"\{ id: '(\w+)', name: '([^']+)', team: '(\w+)', kind: '(\w+)'", js)
+        self.assertTrue(rows)
+        for rid, name, team, kind in rows:
+            self.assertEqual((name, team, kind), (ROLES[rid]['name'], ROLES[rid]['team'], ROLES[rid]['kind']), rid)
+
+    def test_every_character_players_see_is_in_the_font(self):
+        """界面字体只是子集：角色、台词、板子名里出现了新字，要重新运行 tools/fonts/fetch.py。"""
+        import re
+        with open(os.path.join(ROOT, 'public', 'fonts', 'fonts.css'), encoding='utf-8') as f:
+            css = f.read()
+        have = set()
+        for rng in re.findall(r'unicode-range:\s*([^;}]+)', css):
+            for part in rng.split(','):
+                a, _, b = part.strip()[2:].partition('-')
+                have.update(chr(c) for c in range(int(a, 16), int(b or a, 16) + 1))
+        text = (''.join(r['name'] + r['desc'] for r in ROLES.values()) + ''.join(CLIPS.values())
+                + ''.join(p['name'] for p in PRESETS))
+        missing = sorted(set(c for c in text if '\u4e00' <= c <= '\u9fff') - have - set('回'))   # 「回」故意不放进子集
+        self.assertEqual(missing, [], '字体子集里没有这些字，请运行 python3 tools/fonts/fetch.py')
+
+    def test_every_night_step_has_its_lines_and_audio(self):
+        import json
+        with open(os.path.join(ROOT, 'public', 'audio', 'manifest.json'), encoding='utf-8') as f:
+            manifest = json.load(f)
+        for step, _need, _when in NIGHT_STEPS:
+            for x in ('_open', '_prompt', '_close'):
+                self.assertIn(step + x, CLIPS)
+        for cid in CLIPS:
+            self.assertTrue(os.path.exists(os.path.join(ROOT, 'public', 'audio', cid + '.m4a')), cid)
+            self.assertIn(cid, manifest)
 
 
 class Sheriff(unittest.TestCase):
@@ -2234,6 +2593,11 @@ class Fuzz(unittest.TestCase):
                      witcher=1, psychic=1, gravekeeper=1, cupid=1, hunter=1)
         for seed in range(40):
             self.play(roles, 9000 + seed, sheriff=True)
+        # 混血儿和丘比特、机械狼、骑士、猎魔人、守墓人在同一局
+        roles = dict(wolf=2, wolfking=1, mech=1, villager=3, seer=1, witch=1, knight=1, gravekeeper=1,
+                     witcher=1, cupid=1, mixed=1)
+        for seed in range(40):
+            self.play(roles, 9500 + seed, sheriff=True)
 
     def test_15_player_board_with_people_dropping_all_the_time(self):
         """15 人 通灵师女巫猎人守卫骑士 + 狼王机械狼：不停有人掉线、换人播报，也必须每局都能打完。"""
@@ -2241,6 +2605,9 @@ class Fuzz(unittest.TestCase):
         for seed in range(40):
             self.play(roles, 15000 + seed, sheriff=seed % 2 == 0, chaos=True)
         self.assertGreater(self.takeovers, 0)          # 确实测到了「换一台手机播报」
+        mixed = dict(roles, villager=4, mixed=1)       # 同一个板子拿一张村民换成混血儿
+        for seed in range(20):
+            self.play(mixed, 15500 + seed, sheriff=seed % 2 == 0, chaos=True)
         for i, preset in enumerate(PRESETS):
             for k in range(3):
                 self.play(preset['roles'], 16000 + i * 10 + k, sheriff=k != 1, chaos=True)

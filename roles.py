@@ -5,7 +5,7 @@
 选了流传最广的一种，并在 README 里写明。
 """
 
-# team: 阵营（seer 验出来的结果）   kind: 屠边时算哪一边
+# team: 阵营（seer 验出来的结果）   kind: 屠边时算哪一边（none = 哪边都不算）
 # pack: 夜里和其他狼人一起睁眼、互相认识、共同决定刀口
 # boom: 能不能自爆
 ROLES = {
@@ -88,13 +88,19 @@ ROLES = {
         'name': '丘比特', 'team': 'good', 'kind': 'god',
         'desc': '第一夜指定两名玩家成为情侣（可以选自己），一人出局另一人殉情。'
                 '情侣一好一狼时，情侣和你组成第三方阵营，要活到只剩你们才算赢。'},
+
+    'mixed': {
+        'name': '混血儿', 'team': 'good', 'kind': 'none',
+        'desc': '第一夜选一名其他玩家做榜样，从此和他同一阵营、同输同赢（他出局也不变）。'
+                '你不知道他的身份，也不和狼人见面，没有别的技能。被查验、决斗、狩猎时都算好人。屠边时不算神也不算民。'},
 }
 
 ROLE_ORDER = ['wolf', 'wolfking', 'whitewolf', 'beauty', 'nightmare', 'bloodmoon', 'ghostrider',
               'gargoyle', 'mech',
               'villager',
               'seer', 'witch', 'hunter', 'guard', 'idiot', 'knight', 'psychic', 'gravekeeper',
-              'dreamer', 'magician', 'witcher', 'cupid']
+              'dreamer', 'magician', 'witcher', 'cupid',
+              'mixed']
 MULTI = ('wolf', 'villager')                     # 只有这两种可以有多张
 GODS = [r for r in ROLE_ORDER if ROLES[r]['kind'] == 'god']
 
@@ -103,6 +109,7 @@ GODS = [r for r in ROLE_ORDER if ROLES[r]['kind'] == 'god']
 # 原则：会改变别人技能落点的先行动（梦魇、魔术师、摄梦人、守卫），
 # 然后是狼人和依附狼刀的角色，再是要知道刀口的女巫，最后是只拿信息的角色。
 NIGHT_STEPS = [
+    ('mixed', 'mixed', 'first'),       # 最先：梦魇、魔术师都在他后面，选榜样不会被恐惧或交换打乱
     ('cupid', 'cupid', 'first'),
     ('lovers', 'cupid', 'first'),
     ('nightmare', 'nightmare', 'always'),
@@ -163,6 +170,7 @@ PRESETS = [
     _p('p12m', '12人 狼王魔术师', wolf=3, wolfking=1, villager=4, seer=1, witch=1, hunter=1,
        magician=1),
     _p('p12n', '12人 丘比特', wolf=4, villager=4, seer=1, witch=1, hunter=1, cupid=1),
+    _p('p13a', '13人 预女猎白混', wolf=4, villager=4, seer=1, witch=1, hunter=1, idiot=1, mixed=1),
 ]
 
 MIN_SEATS, MAX_SEATS = 4, 18
